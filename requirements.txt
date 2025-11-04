@@ -1,0 +1,6 @@
+Flask
+SQLAlchemy
+python-dotenv
+openai
+gunicorn
+psycopg2-binary

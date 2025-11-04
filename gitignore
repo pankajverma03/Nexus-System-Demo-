@@ -1,0 +1,17 @@
+Byte-compiled / optimized / DLL files
+pycache/
+*.py[cod]
+*$py.class
+OS Generated Files
+.DS_Store
+Thumbs.db
+Virtual Environment
+.venv/
+venv/
+env/
+Database (Agar local SQLite use ho rahi hai)
+*.db
+*.sqlite
+*.sqlite3
+Environment variables (Secrets!)
+.env

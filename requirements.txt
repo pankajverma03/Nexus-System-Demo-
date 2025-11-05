@@ -1,6 +1,7 @@
-flask>=2.2
+Flask>=2.2
 gunicorn
-sqlalchemy>=1.4
+SQLAlchemy>=1.4
 psycopg2-binary
-openai
 requests
+# optional: openai (only if you implement ai_router call)
+openai

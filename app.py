@@ -1,130 +1,102 @@
 # app.py
 import os
 import json
-import random
-import logging
+import time
 from datetime import datetime
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, request, jsonify, render_template
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, scoped_session
+from models import Base, Event, Incident, AISuggestion
+from ai_router import analyze_event_ai
 
-from db import init_db, get_db_session
-from ai_router import get_ai_suggestion
+DATABASE_URL = os.environ.get("DATABASE_URL")
+PORT = int(os.environ.get("PORT", "8080"))
+SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret")
 
-# Config
-DEBUG = os.getenv("FLASK_DEBUG", "0") == "1"
-PORT = int(os.getenv("PORT", 5000))
-SECRET_KEY = os.getenv("SECRET_KEY", "change_me_in_prod")
+# DB setup
+engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
+SessionLocal = scoped_session(sessionmaker(bind=engine, autoflush=False, autocommit=False))
 
-# App init
-app = Flask(__name__, template_folder="templates", static_folder="static")
-app.config.update(SECRET_KEY=SECRET_KEY)
+# Create tables (MVP simplicity)
+Base.metadata.create_all(bind=engine)
 
-# Logging
-logging.basicConfig(level=logging.DEBUG if DEBUG else logging.INFO,
-                    format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-logger = logging.getLogger("nexus")
+app = Flask(__name__, template_folder="templates")
+app.config["SECRET_KEY"] = SECRET_KEY
 
-# Init DB (creates tables if not exists)
-init_db()
-
-# Simulated metrics (pluggable)
-def get_system_metrics():
-    return {
-        "cpu_load": round(random.uniform(10.0, 75.0), 2),
-        "memory_utilization": round(random.uniform(30.0, 90.0), 2),
-        "network_latency_ms": random.randint(5, 150),
-        "total_users": 8764,
-        "active_sessions": random.randint(200, 2000),
-        "disk_capacity_gb": 1024,
-        "disk_used_gb": round(random.uniform(100, 950), 2),
-        "status_icon": "🟢",
-        "health_status": "Operational",
-        "alerts": [
-            {"id": 101, "message": "High CPU on Node 3", "level": "Warning", "time": "2m ago"},
-            {"id": 102, "message": "Firmware deploy success", "level": "Info", "time": "1h ago"}
-        ]
-    }
-
-def now_str():
-    return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-
-def calculate_disk_usage(used, total):
-    try:
-        return round((used / total) * 100, 2) if total else 0
-    except Exception:
-        return 0
-
-# Web UI
 @app.route("/")
-def dashboard():
-    metrics = get_system_metrics()
-    disk_percent = calculate_disk_usage(metrics["disk_used_gb"], metrics["disk_capacity_gb"])
-    ctx = {
-        "title": "Nexus System Dashboard",
-        "metrics": metrics,
-        "disk_usage_percent": disk_percent,
-        "current_time": now_str()
-    }
-    return render_template("dashboard.html", **ctx)
+def index():
+    return render_template("dashboard.html")
 
-# Ingest API (demo)
-@app.route("/v1/ingest/event", methods=["POST"])
-def ingest_event():
-    try:
-        body = request.get_json(force=True)
-    except Exception:
-        return jsonify({"ok": False, "error": "invalid_json"}), 400
-    if not body or "tenantId" not in body or "service" not in body:
-        return jsonify({"ok": False, "error": "tenantId & service required"}), 400
-
-    # persist to DB (demo: write to events table)
-    session = get_db_session()
-    from models import Event
-    ev = Event(tenant_id=body.get("tenantId"), service=body.get("service"),
-               type=body.get("type", "ERROR"), trace_id=body.get("traceId"),
-               metadata=body.get("metadata"), payload=body.get("payload"))
-    session.add(ev)
-    session.commit()
-    session.refresh(ev)
-    event_id = ev.id
-    logger.info("Ingested event %s tenant=%s service=%s", event_id, ev.tenant_id, ev.service)
-    session.close()
-    return jsonify({"ok": True, "id": event_id}), 202
-
-# AI Debug endpoint
-@app.route("/v1/ai/debug", methods=["POST"])
-def ai_debug():
-    data = request.get_json(force=True, silent=True) or {}
-    event = data.get("event")
-    event_id = data.get("eventId")
-    if event_id and not event:
-        # load from DB
-        session = get_db_session()
-        from models import Event
-        ev = session.query(Event).filter(Event.id == event_id).first()
-        session.close()
-        if not ev:
-            return jsonify({"ok": False, "error": "event_not_found"}), 404
-        event = {
-            "id": ev.id, "tenantId": ev.tenant_id, "service": ev.service,
-            "metadata": ev.metadata, "payload": ev.payload
-        }
-    if not event:
-        return jsonify({"ok": False, "error": "event or eventId required"}), 400
-
-    trace_frames = data.get("traceFrames")
-    suggestion = get_ai_suggestion(event, trace_frames)
-    return jsonify({"ok": True, "suggestion": suggestion}), 200
-
-# Health & Status
 @app.route("/v1/health", methods=["GET"])
 def health():
-    return jsonify({"ok": True, "version": "0.1.0", "time": now_str()}), 200
+    # Basic health check
+    try:
+        with SessionLocal() as db:
+            # simple DB ping
+            db.execute("SELECT 1")
+    except Exception as e:
+        return jsonify(ok=False, error=str(e)), 500
+
+    return jsonify(ok=True, version="1.0.0", time=datetime.utcnow().isoformat()), 200
 
 @app.route("/v1/status", methods=["GET"])
 def status():
-    deps = {"db": "ok", "ai_provider": "configured" if os.getenv("OPENAI_API_KEY") else "not-configured"}
-    return jsonify({"ok": True, "deps": deps, "version": "0.1.0", "time": now_str()}), 200
+    # Lightweight status: DB and minimal metrics
+    try:
+        with SessionLocal() as db:
+            db.execute("SELECT 1")
+        db_ok = True
+    except Exception:
+        db_ok = False
+    return jsonify(ok=db_ok, db=db_ok, time=datetime.utcnow().isoformat())
+
+@app.route("/v1/ingest/event", methods=["POST"])
+def ingest_event():
+    data = request.get_json(force=True)
+    if not data:
+        return jsonify(ok=False, error="invalid json"), 400
+
+    tenant = data.get("tenantId", "demo")
+    service = data.get("service", "nexus-demo")
+    ev_type = data.get("type", "EVENT")
+    payload = data.get("payload") or {}
+
+    ev = Event(tenant_id=tenant, service=service, type=ev_type, payload=payload)
+    with SessionLocal() as db:
+        db.add(ev)
+        db.commit()
+        db.refresh(ev)
+
+    return jsonify(ok=True, id=ev.id), 202
+
+@app.route("/v1/ai/debug", methods=["POST"])
+def ai_debug():
+    body = request.get_json(force=True)
+    if not body:
+        return jsonify(ok=False, error="invalid json"), 400
+
+    event_id = body.get("eventId") or body.get("id")
+    if not event_id:
+        return jsonify(ok=False, error="missing eventId"), 400
+
+    # fetch event
+    with SessionLocal() as db:
+        ev = db.query(Event).filter_by(id=event_id).first()
+        if not ev:
+            return jsonify(ok=False, error="event not found"), 404
+
+    # Run AI analysis (this returns dict with analysis + suggestion)
+    analysis = analyze_event_ai(event_id=ev.id, event_payload=ev.payload, event_meta=getattr(ev, "meta_info", None))
+
+    # store suggestion
+    suggestion = AISuggestion(event_id=ev.id, analysis=analysis.get("analysis"), suggestion=analysis.get("suggestion"))
+    with SessionLocal() as db:
+        db.add(suggestion)
+        db.commit()
+        db.refresh(suggestion)
+
+    return jsonify(ok=True, suggestion_id=suggestion.id, analysis=analysis), 200
 
 if __name__ == "__main__":
-    logger.info("Starting Nexus app (debug=%s) on port %s", DEBUG, PORT)
-    app.run(host="0.0.0.0", port=PORT, debug=DEBUG)
+    # local dev
+    app.run(host="0.0.0.0", port=PORT, debug=False)

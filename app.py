@@ -1,5 +1,17 @@
-# inside app.py (replace api_ai_suggest or ai_debug handler)
+# app.py (TOP section)
+from flask import Flask, render_template, request, jsonify
+from sqlalchemy.orm import sessionmaker
+from db import engine
+from models import Event, AISuggestion
 from ai_router import analyze_event_ai
+from datetime import datetime
+
+# Initialize Flask app FIRST
+# app.py (TOP section)
+
+# Initialize Flask app FIRST
+app = Flask(__name__)
+SessionLocal = sessionmaker(bind=engine)
 
 @app.route('/api/ai/suggest', methods=['POST'])
 def api_ai_suggest():

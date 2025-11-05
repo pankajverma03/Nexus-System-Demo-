@@ -1,1 +1,22 @@
-[Immersive content redacted for brevity.]
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>{{ title }}</title></head>
+<body>
+  <h1>{{ title }}</h1>
+  <p>Time: {{ current_time }}</p>
+  <div>
+    <strong>CPU:</strong> {{ metrics.cpu_load }}% |
+    <strong>Memory:</strong> {{ metrics.memory_utilization }}% |
+    <strong>Latency:</strong> {{ metrics.network_latency_ms }}ms
+  </div>
+  <div>
+    <strong>Disk Usage:</strong> {{ disk_usage_percent }}%
+  </div>
+  <h2>Alerts</h2>
+  <ul>
+    {% for a in metrics.alerts %}
+      <li>[{{ a.level }}] {{ a.message }} — {{ a.time }}</li>
+    {% endfor %}
+  </ul>
+</body>
+</html>

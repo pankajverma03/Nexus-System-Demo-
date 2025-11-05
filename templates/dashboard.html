@@ -1,22 +1,97 @@
+<!-- templates/dashboard.html -->
 <!doctype html>
 <html>
-<head><meta charset="utf-8"><title>{{ title }}</title></head>
+<head>
+  <meta charset="utf-8" />
+  <title>Nexus System Dashboard</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body { padding: 18px; background:#f8fafc; }
+    .card { margin-bottom: 12px; }
+    #alerts { max-height:220px; overflow:auto; }
+    pre { white-space:pre-wrap; word-break:break-word; }
+  </style>
+</head>
 <body>
-  <h1>{{ title }}</h1>
-  <p>Time: {{ current_time }}</p>
-  <div>
-    <strong>CPU:</strong> {{ metrics.cpu_load }}% |
-    <strong>Memory:</strong> {{ metrics.memory_utilization }}% |
-    <strong>Latency:</strong> {{ metrics.network_latency_ms }}ms
+  <div class="container">
+    <h1 class="mb-3">Nexus System Dashboard</h1>
+    <div class="row">
+      <div class="col-md-6">
+        <div class="card p-3">
+          <h5>System Snapshot</h5>
+          <div id="snapshot">Loading...</div>
+        </div>
+        <div class="card p-3">
+          <h5>Alerts</h5>
+          <ul id="alerts" class="list-unstyled"></ul>
+        </div>
+      </div>
+
+      <div class="col-md-6">
+        <div class="card p-3">
+          <h5>AI Debug Assistant</h5>
+          <div class="mb-2">
+            <input id="eventId" class="form-control" placeholder="paste eventId (eg. ev_xxx)" />
+          </div>
+          <div class="d-grid gap-2 mb-2">
+            <button id="askBtn" class="btn btn-primary">Ask AI for Debug Suggestions</button>
+          </div>
+          <div id="aiBox" style="display:none">
+            <h6>AI Analysis</h6>
+            <pre id="aiAnalysis"></pre>
+            <h6>AI Suggestion</h6>
+            <pre id="aiSuggestion"></pre>
+          </div>
+        </div>
+
+        <div class="card p-3">
+          <h6>Quick Tools</h6>
+          <button id="createEvent" class="btn btn-outline-secondary">Create sample event</button>
+          <small class="text-muted d-block mt-2">Use sample events for the demo to generate AI results quickly.</small>
+        </div>
+      </div>
+    </div>
   </div>
-  <div>
-    <strong>Disk Usage:</strong> {{ disk_usage_percent }}%
-  </div>
-  <h2>Alerts</h2>
-  <ul>
-    {% for a in metrics.alerts %}
-      <li>[{{ a.level }}] {{ a.message }} — {{ a.time }}</li>
-    {% endfor %}
-  </ul>
+
+<script>
+async function loadSnapshot(){
+  try{
+    const r = await fetch('/v1/status');
+    const j = await r.json();
+    document.getElementById('snapshot').innerText = JSON.stringify(j, null, 2);
+    // simple alerts demo
+    const alerts = ["[Warning] High CPU on Node 3 — 2m ago", "[Info] Firmware deploy success — 1h ago"];
+    const el = document.getElementById('alerts');
+    el.innerHTML = alerts.map(a=>`<li>• ${a}</li>`).join('');
+  }catch(e){
+    document.getElementById('snapshot').innerText = "error";
+  }
+}
+document.getElementById('createEvent').addEventListener('click', async ()=>{
+  const payload = { tenantId: "demo", service: "nexus-demo", type: "ERROR", payload: { message: "sample timeout event", stack: "simulated stack" } };
+  const r = await fetch('/v1/ingest/event', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+  const j = await r.json();
+  if(j.ok) {
+    alert('Event created: ' + j.id);
+    document.getElementById('eventId').value = j.id;
+  } else alert('Error creating event');
+});
+
+document.getElementById('askBtn').addEventListener('click', async ()=>{
+  const id = document.getElementById('eventId').value.trim();
+  if(!id){ alert('Paste an eventId first'); return; }
+  document.getElementById('aiBox').style.display='none';
+  const r = await fetch('/v1/ai/debug', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ eventId: id })});
+  const j = await r.json();
+  if(!j.ok){ alert('Error: ' + (j.error || JSON.stringify(j))); return; }
+  document.getElementById('aiAnalysis').textContent = j.analysis || (j.analysis || JSON.stringify(j.analysis,null,2));
+  document.getElementById('aiSuggestion').textContent = j.analysis ? j.suggestion || '' : JSON.stringify(j.analysis||j, null, 2);
+  document.getElementById('aiBox').style.display='block';
+});
+
+loadSnapshot();
+setInterval(loadSnapshot, 5000);
+</script>
 </body>
 </html>

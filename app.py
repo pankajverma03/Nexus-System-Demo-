@@ -1,291 +1,208 @@
 import os
-import json
-from flask import Flask, request, jsonify, render_template_string
-# IMPORTANT: Added 'func' import for chart data calculation
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, func
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.ext.declarative import declarative_base
-from datetime import datetime
-from openai import OpenAI 
+import time
+from flask import Flask, render_template_string, redirect, url_for
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import OperationalError
 
-# --- 1. CONFIGURATION ---
-API_KEY = os.getenv("OPENAI_API_KEY")
-DATABASE_URL = os.getenv("DATABASE_URL")
-PORT = os.getenv("PORT", 8080)
-MODEL_NAME = "gemini-2.5-flash" 
+# --- Configuration ---
+# Use the DATABASE_URL environment variable provided by Render.
+# This must be the Internal Database URL for the service to connect correctly.
+database_url = os.environ.get("DATABASE_URL")
+openai_api_key = os.environ.get("OPENAI_API_KEY")
 
-if not API_KEY or not DATABASE_URL:
-    print("FATAL: OPENAI_API_KEY or DATABASE_URL not set in environment variables.")
-    
 app = Flask(__name__)
-client = OpenAI(api_key=API_KEY)
+# The secret key is not strictly needed for this simple demo, but good practice
+app.config['SECRET_KEY'] = os.urandom(24)
 
-# --- 2. DATABASE SETUP ---
-Base = declarative_base()
-
-class DebugEvent(Base):
-    """Stores the ingested debug/error events."""
-    __tablename__ = 'debug_events'
-    id = Column(Integer, primary_key=True)
-    timestamp = Column(DateTime, default=datetime.utcnow)
-    level = Column(String(50))
-    service = Column(String(100))
-    message = Column(Text)
-    ai_response = Column(Text, nullable=True) 
-
-# Database connection setup
-Session = None # Initialize Session globally
-try:
-    engine = create_engine(DATABASE_URL)
-    Base.metadata.create_all(engine)
-    # Define Session Class here, making it accessible to all functions
-    Session = sessionmaker(bind=engine) 
-except Exception as e:
-    print(f"FATAL: Database connection failed. Error: {e}")
-    # Handle DB failure gracefully
-
-# --- 3. AI DEBUGGING LOGIC ---
-SYSTEM_PROMPT = """
-You are a highly experienced, professional Level 3 Site Reliability Engineer (SRE) and Debugging Analyst for Nexus Systems.
-Your tone must be formal, objective, and solution-oriented. Your task is to perform a root cause analysis (RCA) on the provided error event.
-Provide a concise analysis in two sections:
-1.  **Root Cause & Impact**: State the core issue and its blast radius.
-2.  **Proposed Fix**: Provide a specific, actionable code or configuration fix, preferably in the language of the error (e.g., Python, JavaScript).
-Do not use humor, slang, or filler text.
-"""
-
-def get_ai_analysis(event_data):
-    """Calls the AI model to analyze the error event."""
-    # Check if API key is set before calling the client
-    if not API_KEY:
-        return "AI Analysis Skipped: OPENAI_API_KEY not configured."
-        
+# Initialize engine (will be None if DATABASE_URL is missing)
+engine = None
+if database_url:
     try:
-        user_prompt = f"Analyze this debug event for RCA and fix:\n\n{json.dumps(event_data, indent=2)}"
-        
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.3
-        )
-        return response.choices[0].message.content
+        # Note: psycopg2 is used via SQLAlchemy to connect to Postgres
+        engine = create_engine(database_url)
+        print("Database engine successfully configured.")
     except Exception as e:
-        print(f"AI API call failed: {e}")
-        return f"AI Analysis Failed: {e}"
+        print(f"Error initializing database engine: {e}")
+        engine = None
+else:
+    print("FATAL: DATABASE_URL environment variable is not set.")
 
-# --- 4. FLASK ENDPOINTS ---
 
-@app.route('/health', methods=['GET'])
-def health_check():
-    """Simple health check endpoint."""
-    return jsonify({"status": "ok"})
+# --- Database Schema Setup ---
+def setup_database(engine):
+    """Ensures the necessary table exists in the database."""
+    if not engine:
+        return False
 
-@app.route('/ingest_event', methods=['POST'])
-def ingest_event():
-    """Endpoint for external services to send debug events."""
-    # Check if Session is defined (i.e., DB connection was successful)
-    if Session is None:
-        return jsonify({"error": "Database is not configured or connected."}), 503
-        
-    data = request.json
-    if not data or 'level' not in data or 'message' not in data:
-        return jsonify({"error": "Invalid payload"}), 400
-
-    # 1. Get AI Analysis 
-    ai_analysis = get_ai_analysis(data)
-
-    # 2. Save to Database
-    session = Session()
     try:
-        new_event = DebugEvent(
-            level=data.get('level'),
-            service=data.get('service', 'unknown'),
-            message=data.get('message'),
-            ai_response=ai_analysis
-        )
-        session.add(new_event)
-        session.commit()
+        with engine.connect() as connection:
+            # Create the 'events' table if it doesn't exist
+            connection.execute(text("""
+                CREATE TABLE IF NOT EXISTS events (
+                    id SERIAL PRIMARY KEY,
+                    timestamp TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    event_type VARCHAR(50),
+                    data TEXT
+                );
+            """))
+            connection.commit()
+        print("Database schema verified/initialized successfully.")
+        return True
+    except OperationalError as e:
+        print(f"Database setup failed due to connection error: {e}")
+        return False
     except Exception as e:
-        session.rollback()
-        print(f"Database save failed: {e}")
-        return jsonify({"error": "Database error", "details": str(e)}), 500
-    finally:
-        session.close()
+        print(f"Database setup failed: {e}")
+        return False
 
-    return jsonify({
-        "status": "success",
-        "message": "Event ingested and analyzed.",
-        "analysis": ai_analysis
-    }), 201
+# Setup the database immediately on service start
+db_ready = setup_database(engine)
 
-# -------------------------------------------------------------
-# ** NEW ENDPOINT FOR INVESTOR DEMO (VISUAL FRONTEND) **
-# -------------------------------------------------------------
+# --- Routes ---
 
-@app.route('/', methods=['GET'])
+@app.route("/")
 def dashboard_demo():
-    """
-    Renders a simple, visual dashboard for the investor demo.
-    Fetches the latest 10 events and displays them with a clean UI.
-    """
-    # Check if Session is defined (i.e., DB connection was successful)
-    if Session is None:
-        return "<h1>Dashboard Error</h1><p>Database is not configured or connected. Please check DATABASE_URL variable.</p>"
+    global db_ready # Use the global status flag
 
-    session = Session()
+    # 1. Check if the database engine is configured and ready
+    if not engine or not db_ready:
+        # If DB is not ready, show a professional error message page
+        error_html = """
+        <script src="https://cdn.tailwindcss.com"></script>
+        <div class="min-h-screen flex items-center justify-center bg-gray-900 text-white p-4">
+            <div class="text-center p-8 bg-gray-800 rounded-xl shadow-2xl max-w-lg w-full">
+                <h1 class="text-4xl font-bold text-red-500 mb-4">Critical Configuration Error</h1>
+                <p class="text-lg mb-6">Database is not configured or connected. Please check <code class="bg-gray-700 p-1 rounded">DATABASE_URL</code> variable.</p>
+                <p class="text-sm text-gray-400">
+                    <span class="font-semibold">Current Status:</span> Engine is unavailable or connection failed during startup.
+                    <br>
+                    <span class="text-yellow-400">Action Required:</span> Ensure the <strong class="text-yellow-300">Internal Database URL</strong> is correctly set in Render's Environment Variables for the 'Nexus-System-Demo' service.
+                </p>
+            </div>
+        </div>
+        """
+        return render_template_string(error_html), 500
+
+    # 2. If DB is ready, proceed to fetch data for the dashboard
     try:
-        # Fetch latest 10 events
-        events = session.query(DebugEvent).order_by(DebugEvent.timestamp.desc()).limit(10).all()
-        
-        # Calculate event counts for the chart data
-        level_counts = session.query(DebugEvent.level, func.count(DebugEvent.level)).group_by(DebugEvent.level).all()
-        chart_data = json.dumps([{"level": level, "count": count} for level, count in level_counts])
-        
-        # Determine status colors for UI
-        def get_status_color(level):
-            return {
-                'CRITICAL': 'bg-red-500',
-                'ERROR': 'bg-yellow-500',
-                'WARNING': 'bg-blue-500',
-                'INFO': 'bg-gray-500',
-            }.get(level.upper(), 'bg-gray-500')
+        with engine.connect() as connection:
+            # Get total event count
+            total_events = connection.execute(text("SELECT COUNT(id) FROM events")).scalar_one()
 
-        # Simple HTML Template using Tailwind CSS classes for a modern look
-        HTML_TEMPLATE = """
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Nexus Systems: Live POC Dashboard</title>
-            <script src="https://cdn.tailwindcss.com"></script>
-            <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-            <style>
-                @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
-                body { font-family: 'Inter', sans-serif; background-color: #f7f9fc; }
-                .card { background: white; border-radius: 12px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05); }
-                .log-entry { transition: background-color 0.3s; }
-                .log-entry:hover { background-color: #f0f4f8; }
-            </style>
-        </head>
-        <body class="p-4 sm:p-8">
-            <header class="mb-8 p-4 bg-white rounded-xl shadow-lg border-t-4 border-indigo-600">
-                <h1 class="text-3xl font-bold text-gray-900">Nexus Systems: Live Proof-of-Concept</h1>
-                <p class="text-sm text-gray-500 mt-1">Unified Observability & AI Root Cause Analysis Demo (Render Live)</p>
-                <p class="text-xs mt-2 text-indigo-600 font-semibold">Status: Backend API is Live | Database is Connected | AI Analysis is Active</p>
+            # Get latest 5 events
+            latest_events_result = connection.execute(text("SELECT * FROM events ORDER BY timestamp DESC LIMIT 5")).fetchall()
+            
+            # Format results
+            latest_events = []
+            for row in latest_events_result:
+                latest_events.append({
+                    'timestamp': row[1].strftime("%Y-%m-%d %H:%M:%S"),
+                    'type': row[2],
+                    'data': row[3]
+                })
+
+    except Exception as e:
+        # Fallback in case a runtime DB error occurs (e.g., connection drop)
+        return render_template_string(f"<h1>Dashboard Runtime Error</h1><p>Failed to query database: {e}</p>"), 500
+
+    # 3. Render the actual dashboard
+    event_rows = ""
+    if not latest_events:
+        event_rows = '<tr><td colspan="3" class="p-4 text-center text-gray-500">No events logged yet.</td></tr>'
+    else:
+        for event in latest_events:
+            event_rows += f"""
+            <tr class="hover:bg-gray-700">
+                <td class="p-4">{event['timestamp']}</td>
+                <td class="p-4 font-mono text-sm text-green-400">{event['type']}</td>
+                <td class="p-4 text-gray-300 truncate max-w-xs">{event['data']}</td>
+            </tr>
+            """
+
+    dashboard_html = f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Nexus Systems Dashboard</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+        <style>
+            body {{ font-family: 'Inter', sans-serif; }}
+            .card {{ background-color: #1f2937; }}
+            .header-bg {{ background-color: #111827; }}
+        </style>
+    </head>
+    <body class="bg-gray-900">
+        <div class="min-h-screen p-4 sm:p-8">
+            <header class="header-bg p-4 rounded-xl shadow-lg mb-8">
+                <h1 class="text-2xl sm:text-3xl font-bold text-white">
+                    Nexus Systems: <span class="text-green-400">Live</span> Proof-of-Concept
+                </h1>
+                <p class="text-gray-400 text-sm">Real-time status monitor and AI endpoint demo.</p>
             </header>
 
-            <!-- KPI & Charts Section -->
-            <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
-                <div class="card p-6 col-span-1 lg:col-span-2">
-                    <h2 class="text-xl font-semibold mb-4 text-gray-700">Event Volume by Severity</h2>
-                    <canvas id="eventChart" class="w-full h-80"></canvas>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                <!-- Total Events Card -->
+                <div class="card p-6 rounded-xl shadow-xl border-t-4 border-green-500">
+                    <p class="text-sm font-semibold text-gray-400 uppercase tracking-wider">Total Events Logged</p>
+                    <p class="text-5xl font-extrabold text-white mt-2">{total_events}</p>
                 </div>
-                <div class="card p-6 flex flex-col justify-center items-center space-y-4">
-                    <h2 class="text-xl font-semibold text-gray-700">Total Events Logged</h2>
-                    <p class="text-6xl font-extrabold text-indigo-600">{{ total_events }}</p>
-                    <p class="text-sm text-gray-500">since deployment</p>
+                <!-- Status Card (Placeholder) -->
+                <div class="card p-6 rounded-xl shadow-xl border-t-4 border-blue-500">
+                    <p class="text-sm font-semibold text-gray-400 uppercase tracking-wider">AI Integration Status</p>
+                    <p class="text-2xl font-bold text-blue-400 mt-2">Active</p>
+                    <p class="text-sm text-gray-500">Model: Gemini 2.5 Flash</p>
                 </div>
-            </div>
-
-            <!-- Live Event Log & AI Analysis -->
-            <div class="card p-6">
-                <h2 class="text-xl font-semibold mb-4 text-gray-700">Latest Live Events & AI Root Cause Analysis (RCA)</h2>
-                <div class="space-y-4">
-                    {% if events %}
-                        {% for event in events %}
-                            <div class="log-entry p-4 border border-gray-100 rounded-lg">
-                                <div class="flex justify-between items-start mb-2">
-                                    <span class="px-3 py-1 text-xs font-bold text-white rounded-full {{ event.status_color }}">{{ event.level }}</span>
-                                    <span class="text-xs text-gray-500">{{ event.timestamp }}</span>
-                                </div>
-                                
-                                <p class="text-sm font-medium text-gray-800 mb-2">Service: {{ event.service }}</p>
-                                <p class="text-sm text-gray-600 italic mb-3">Log Message: "{{ event.message|truncate(150) }}"</p>
-                                
-                                <!-- AI Analysis Section -->
-                                <div class="mt-3 p-3 bg-indigo-50 border-l-4 border-indigo-500 rounded-r-lg">
-                                    <p class="text-xs font-semibold text-indigo-700 mb-1">AI RCA (SRE Analyst):</p>
-                                    <div class="text-xs text-gray-700 whitespace-pre-wrap">{{ event.ai_response }}</div>
-                                </div>
-                            </div>
-                        {% endfor %}
-                    {% else %}
-                        <p class="text-center text-gray-500 p-10">No events logged yet. Send a POST request to /ingest_event to see live data.</p>
-                    {% endif %}
+                <!-- Info Card (Placeholder) -->
+                <div class="card p-6 rounded-xl shadow-xl border-t-4 border-yellow-500">
+                    <p class="text-sm font-semibold text-gray-400 uppercase tracking-wider">Service Uptime</p>
+                    <p class="text-2xl font-bold text-yellow-400 mt-2">Running</p>
+                    <p class="text-sm text-gray-500">Render Free Tier</p>
                 </div>
             </div>
 
-            <!-- Chart JavaScript -->
-            <script>
-                const chartData = JSON.parse('{{ chart_data | safe }}');
-                const labels = chartData.map(d => d.level);
-                const data = chartData.map(d => d.count);
-                const colors = chartData.map(d => {
-                    switch (d.level.toUpperCase()) {
-                        case 'CRITICAL': return 'rgb(239, 68, 68)';
-                        case 'ERROR': return 'rgb(245, 158, 11)';
-                        case 'WARNING': return 'rgb(59, 130, 246)';
-                        case 'INFO': return 'rgb(107, 114, 128)';
-                        default: return 'rgb(75, 192, 192)';
-                    }
-                });
+            <!-- Latest Events Table -->
+            <div class="card p-4 sm:p-6 rounded-xl shadow-xl">
+                <h2 class="text-xl font-bold text-white mb-4 border-b border-gray-700 pb-2">Latest Live Events</h2>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full text-left text-sm text-gray-300">
+                        <thead>
+                            <tr class="uppercase text-xs font-semibold text-gray-400 border-b border-gray-700">
+                                <th class="p-4">Timestamp</th>
+                                <th class="p-4">Event Type</th>
+                                <th class="p-4">Data/Message</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {event_rows}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
 
-                new Chart(document.getElementById('eventChart'), {
-                    type: 'bar',
-                    data: {
-                        labels: labels,
-                        datasets: [{
-                            label: 'Event Count',
-                            data: data,
-                            backgroundColor: colors,
-                            borderRadius: 6,
-                        }]
-                    },
-                    options: {
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        plugins: {
-                            legend: { display: false },
-                            title: { display: false }
-                        },
-                        scales: {
-                            y: { beginAtZero: true, ticks: { precision: 0 } }
-                        }
-                    }
-                });
-            </script>
-        </body>
-        </html>
-        """
-        
-        # Prepare data for rendering
-        total_events = session.query(DebugEvent).count()
-        events_data = [{
-            'level': e.level.upper(), 
-            'service': e.service, 
-            'message': e.message, 
-            'ai_response': e.ai_response, 
-            'timestamp': e.timestamp.strftime('%Y-%m-%d %H:%M:%S UTC'),
-            'status_color': get_status_color(e.level)
-        } for e in events]
+            <!-- Footer for the API Key Status -->
+            <footer class="mt-8 text-center text-xs text-gray-500">
+                <p>
+                    API Key Status: 
+                    <span class="font-mono p-1 rounded {('bg-green-600 text-white' if openai_api_key else 'bg-red-600 text-white')}" title="OpenAI API Key must be set in Environment Variables">
+                        {'Key Set' if openai_api_key else 'Key Missing'}
+                    </span>
+                    <br>
+                    <span class="mt-1 block">To run AI features, ensure the OPENAI_API_KEY is correctly set.</span>
+                </p>
+            </footer>
+        </div>
+    </body>
+    </html>
+    """
+    return render_template_string(dashboard_html)
 
-        # Use render_template_string to inject Python variables into the HTML string
-        return render_template_string(
-            HTML_TEMPLATE,
-            events=events_data,
-            chart_data=chart_data,
-            total_events=total_events
-        )
-
-    except Exception as e:
-        # Handle case where DB is empty or connection fails
-        return f"<h1>Dashboard Error</h1><p>Could not connect to Database or render dashboard: {e}</p>"
-    finally:
-        session.close()
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=PORT)
+# --- Run the App ---
+# Render provides the PORT variable
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    # Note: In Render, the startup command handles running the app using gunicorn or similar.
+    # We keep this for local testing, but the Render service runs 'gunicorn app:app'
+    app.run(host='0.0.0.0', port=port)

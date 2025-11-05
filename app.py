@@ -1,15 +1,22 @@
-# app.py - Nexus System (clean, deployment-ready)
+# ------- app.py (TOP section) - paste exactly this block at file top -------
 from flask import Flask, render_template, request, jsonify
 from sqlalchemy.orm import sessionmaker
 from db import engine
 from models import Event, AISuggestion
-from ai_router import analyze_event_ai
 from datetime import datetime
 
-# Initialize Flask app FIRST
+# Create Flask app FIRST (must be before any @app.route usage)
 app = Flask(__name__)
 SessionLocal = sessionmaker(bind=engine)
 
+# Delay heavy imports (ai_router) until runtime to avoid import-time crashes
+# If ai_router import fails during startup it can break the whole process.
+try:
+    from ai_router import analyze_event_ai
+except Exception as e:
+    analyze_event_ai = None
+    app.logger.warning(f"ai_router import failed at startup: {e}")
+# ---------------------------------------------------------------------------
 # --- Dashboard (simple demo UI, uses templates/dashboard.html) ---
 @app.route('/')
 def dashboard():

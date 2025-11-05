@@ -1,6 +1,6 @@
-Flask>=2.2
-SQLAlchemy>=1.4
-psycopg2-binary
+flask>=2.2
 gunicorn
-python-dotenv
+sqlalchemy>=1.4
+psycopg2-binary
 openai
+requests

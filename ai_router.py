@@ -1,46 +1,59 @@
 # ai_router.py
 import os
-import logging
-logger = logging.getLogger("ai_router")
+import time
+import json
+import openai
+from typing import Dict
 
-OPENAI_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+openai.api_key = OPENAI_API_KEY
 
-# try import openai safely
-try:
-    import openai
-    openai.api_key = OPENAI_KEY
-except Exception:
-    openai = None
+# local heuristic fallback - simple template-based analysis
+def local_heuristic(event_payload, event_meta) -> Dict:
+    log = json.dumps(event_payload)[:2000]
+    hints = []
+    if isinstance(event_payload, dict):
+        if "timeout" in json.dumps(event_payload).lower():
+            hints.append("Check external API timeouts and retry logic (exponential backoff).")
+        if "database" in json.dumps(event_payload).lower():
+            hints.append("Check DB connection pool, slow query, or transaction locks.")
+    if not hints:
+        hints.append("No strong heuristic found. Inspect traces and logs for correlationId/stacktrace.")
+    return {"analysis": f"Local heuristic: {len(hints)} hint(s) found.", "suggestion": " ; ".join(hints)}
 
-def call_openai(prompt):
-    if not openai:
-        raise RuntimeError("openai sdk missing or key not set")
-    resp = openai.ChatCompletion.create(
-        model="gpt-4o-mini", messages=[{"role":"system","content":"You are an SRE assistant."},{"role":"user","content":prompt}],
-        max_tokens=400, temperature=0.0
-    )
-    return resp.choices[0].message.content
-
-def local_heuristic(event):
-    msg = ""
+def call_openai_for_analysis(prompt: str, timeout_seconds: int = 10) -> Dict:
     try:
-        msg = (event.get("payload") or {}).get("message","").lower()
-    except Exception:
-        msg = str(event)
-    if "timeout" in msg:
-        return {"source":"heuristic","hypothesis":"Downstream timeout","steps":["Check DB","Increase timeout or retry"], "confidence":0.6}
-    if "nullpointer" in msg or "none type" in msg:
-        return {"source":"heuristic","hypothesis":"Null reference","steps":["Add null checks","Instrument return values"], "confidence":0.8}
-    return {"source":"heuristic","hypothesis":"Not enough context","steps":["Collect diag bundle","Run LLM analysis"], "confidence":0.2}
+        # using chat completion (adjust model to your account)
+        resp = openai.ChatCompletion.create(
+            model="gpt-4o-mini",  # or "gpt-5" if enabled for your API key
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=400,
+            temperature=0.2,
+            n=1,
+            timeout=timeout_seconds
+        )
+        text = resp["choices"][0]["message"]["content"].strip()
+        return {"analysis": text[:4000], "suggestion": text[:2000]}
+    except Exception as e:
+        # bubble up exception to allow fallback
+        raise
 
-def get_ai_suggestion(event, trace_frames=None):
-    prompt = f"Event: {event}\nTrace: {trace_frames}\nProvide hypothesis, remediation steps and code snippet if possible."
-    # Try OpenAI first
-    if OPENAI_KEY and openai:
-        try:
-            text = call_openai(prompt)
-            return {"source":"openai","text":text}
-        except Exception as e:
-            logger.warning("OpenAI call failed: %s", str(e))
-    # fallback
-    return local_heuristic(event)
+def analyze_event_ai(event_id: str, event_payload, event_meta=None) -> Dict:
+    # Build a short prompt
+    prompt = (
+        f"Event ID: {event_id}\n"
+        f"Payload: {json.dumps(event_payload, default=str)[:2000]}\n"
+        f"Meta: {json.dumps(event_meta, default=str)[:1000]}\n\n"
+        "Provide: 1) short analysis (1-3 lines). 2) concrete debugging suggestions in bullet points.\n"
+        "Be concise."
+    )
+
+    # Try OpenAI first (fast timeout). If fails, use local heuristic.
+    try:
+        if OPENAI_API_KEY:
+            return call_openai_for_analysis(prompt, timeout_seconds=8)
+        else:
+            return local_heuristic(event_payload, event_meta)
+    except Exception:
+        # fallback to local heuristic
+        return local_heuristic(event_payload, event_meta)

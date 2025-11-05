@@ -1,76 +1,130 @@
-from flask import Flask, render_template
-from datetime import datetime
+# app.py
+import os
+import json
 import random
+import logging
+from datetime import datetime
+from flask import Flask, render_template, request, jsonify
 
-# Initialize the Flask application.
-app = Flask(__name__)
+from db import init_db, get_db_session
+from ai_router import get_ai_suggestion
 
-# --- Simulated System Metrics (To look professional and functional) ---
+# Config
+DEBUG = os.getenv("FLASK_DEBUG", "0") == "1"
+PORT = int(os.getenv("PORT", 5000))
+SECRET_KEY = os.getenv("SECRET_KEY", "change_me_in_prod")
 
-def get_simulated_metrics():
-    """Generates dynamic and realistic system metrics data."""
-    
-    # Simulate current usage metrics
-    cpu_load = random.randint(30, 95)
-    memory_usage = random.randint(45, 90)
-    disk_utilization = random.randint(55, 99)
-    
-    # Determine system status based on disk usage (high disk usage implies risk)
-    if disk_utilization > 90:
-        health_status = 'Critical'
-        status_color = 'bg-red-500'
-    elif cpu_load > 85 or memory_usage > 80:
-        health_status = 'Warning'
-        status_color = 'bg-yellow-500'
-    else:
-        health_status = 'Operational'
-        status_color = 'bg-green-500'
+# App init
+app = Flask(__name__, template_folder="templates", static_folder="static")
+app.config.update(SECRET_KEY=SECRET_KEY)
 
-    # Simulated recent alerts
-    alerts = [
-        {"time": "09:30 AM", "message": "High Disk Utilization (98%) on Storage Node Alpha."},
-        {"time": "10:15 AM", "message": f"CPU spike detected: {cpu_load}%"},
-        {"time": "11:05 AM", "message": "Network latency increased by 15ms."}
-    ]
+# Logging
+logging.basicConfig(level=logging.DEBUG if DEBUG else logging.INFO,
+                    format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger("nexus")
 
+# Init DB (creates tables if not exists)
+init_db()
+
+# Simulated metrics (pluggable)
+def get_system_metrics():
     return {
-        'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        'cpu_load': cpu_load,
-        'memory_usage': memory_usage,
-        'disk_utilization': disk_utilization,
-        'health_status': health_status,
-        'status_color': status_color,
-        'uptime_days': 157,
-        'total_servers': 42,
-        'alerts': alerts
+        "cpu_load": round(random.uniform(10.0, 75.0), 2),
+        "memory_utilization": round(random.uniform(30.0, 90.0), 2),
+        "network_latency_ms": random.randint(5, 150),
+        "total_users": 8764,
+        "active_sessions": random.randint(200, 2000),
+        "disk_capacity_gb": 1024,
+        "disk_used_gb": round(random.uniform(100, 950), 2),
+        "status_icon": "🟢",
+        "health_status": "Operational",
+        "alerts": [
+            {"id": 101, "message": "High CPU on Node 3", "level": "Warning", "time": "2m ago"},
+            {"id": 102, "message": "Firmware deploy success", "level": "Info", "time": "1h ago"}
+        ]
     }
 
-# --- Routes ---
+def now_str():
+    return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
 
-# Route for the main dashboard page (Home page).
-@app.route('/')
+def calculate_disk_usage(used, total):
+    try:
+        return round((used / total) * 100, 2) if total else 0
+    except Exception:
+        return 0
+
+# Web UI
+@app.route("/")
 def dashboard():
-    """Renders the dashboard with simulated data."""
-    # Fetch the dynamic metrics
-    metrics = get_simulated_metrics()
-    
-    # Render the 'dashboard.html' template and pass the data
-    return render_template(
-        'dashboard.html', 
-        title='Nexus System Dashboard',
-        data=metrics
-    )
+    metrics = get_system_metrics()
+    disk_percent = calculate_disk_usage(metrics["disk_used_gb"], metrics["disk_capacity_gb"])
+    ctx = {
+        "title": "Nexus System Dashboard",
+        "metrics": metrics,
+        "disk_usage_percent": disk_percent,
+        "current_time": now_str()
+    }
+    return render_template("dashboard.html", **ctx)
 
-# A simple metrics route to show functionality (not strictly necessary for the demo, but good practice)
-@app.route('/metrics')
-def metrics_page():
-    """Shows raw simulated metrics data as JSON."""
-    return get_simulated_metrics()
+# Ingest API (demo)
+@app.route("/v1/ingest/event", methods=["POST"])
+def ingest_event():
+    try:
+        body = request.get_json(force=True)
+    except Exception:
+        return jsonify({"ok": False, "error": "invalid_json"}), 400
+    if not body or "tenantId" not in body or "service" not in body:
+        return jsonify({"ok": False, "error": "tenantId & service required"}), 400
 
-# --- Error Handler ---
+    # persist to DB (demo: write to events table)
+    session = get_db_session()
+    from models import Event
+    ev = Event(tenant_id=body.get("tenantId"), service=body.get("service"),
+               type=body.get("type", "ERROR"), trace_id=body.get("traceId"),
+               metadata=body.get("metadata"), payload=body.get("payload"))
+    session.add(ev)
+    session.commit()
+    session.refresh(ev)
+    event_id = ev.id
+    logger.info("Ingested event %s tenant=%s service=%s", event_id, ev.tenant_id, ev.service)
+    session.close()
+    return jsonify({"ok": True, "id": event_id}), 202
 
-# Custom handler for 404 Not Found errors.
-@app.errorhandler(404)
-def page_not_found(error):
-    # Render the 'error.html' template.
-    return render_template('error.html', title='Page Not Found', error_code=404), 404
+# AI Debug endpoint
+@app.route("/v1/ai/debug", methods=["POST"])
+def ai_debug():
+    data = request.get_json(force=True, silent=True) or {}
+    event = data.get("event")
+    event_id = data.get("eventId")
+    if event_id and not event:
+        # load from DB
+        session = get_db_session()
+        from models import Event
+        ev = session.query(Event).filter(Event.id == event_id).first()
+        session.close()
+        if not ev:
+            return jsonify({"ok": False, "error": "event_not_found"}), 404
+        event = {
+            "id": ev.id, "tenantId": ev.tenant_id, "service": ev.service,
+            "metadata": ev.metadata, "payload": ev.payload
+        }
+    if not event:
+        return jsonify({"ok": False, "error": "event or eventId required"}), 400
+
+    trace_frames = data.get("traceFrames")
+    suggestion = get_ai_suggestion(event, trace_frames)
+    return jsonify({"ok": True, "suggestion": suggestion}), 200
+
+# Health & Status
+@app.route("/v1/health", methods=["GET"])
+def health():
+    return jsonify({"ok": True, "version": "0.1.0", "time": now_str()}), 200
+
+@app.route("/v1/status", methods=["GET"])
+def status():
+    deps = {"db": "ok", "ai_provider": "configured" if os.getenv("OPENAI_API_KEY") else "not-configured"}
+    return jsonify({"ok": True, "deps": deps, "version": "0.1.0", "time": now_str()}), 200
+
+if __name__ == "__main__":
+    logger.info("Starting Nexus app (debug=%s) on port %s", DEBUG, PORT)
+    app.run(host="0.0.0.0", port=PORT, debug=DEBUG)

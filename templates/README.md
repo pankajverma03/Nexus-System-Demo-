@@ -1,0 +1,1 @@
+Flask templates folder.।

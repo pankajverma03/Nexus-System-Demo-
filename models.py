@@ -16,7 +16,7 @@ class Event(Base):
     ts = Column(DateTime(timezone=True), server_default=func.now())
     type = Column(String, nullable=False)
     trace_id = Column(String, index=True)
-    metadata = Column(JSON)
+    meta_info = Column(JSON)   # renamed from 'metadata' to avoid SQLAlchemy reserved name
     payload = Column(JSON)
     processed = Column(Boolean, default=False)
 

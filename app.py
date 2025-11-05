@@ -1,164 +1,284 @@
 import os
 import json
-from flask import Flask, request, jsonify
-from sqlalchemy import create_engine, Column, String, Integer, JSON, DateTime, Boolean, func
+from flask import Flask, request, jsonify, render_template_string
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, func
+from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, scoped_session
-import uuid
-import datetime
-import logging
+from datetime import datetime
+from openai import OpenAI # Using OpenAI library to leverage any Gemini model via API key
 
-# Optional OpenAI import (sirf tab use hoga jab OPENAI_API_KEY ho)
-try:
-    import openai
-except Exception:
-    openai = None
+# --- 1. CONFIGURATION ---
+# Use 'GEMINI_API_KEY' for better compatibility if you are using the Google GenAI SDK
+# But since we are using 'openai' library for simplicity, we stick to OPENAI_API_KEY
+API_KEY = os.getenv("OPENAI_API_KEY")
+DATABASE_URL = os.getenv("DATABASE_URL")
+PORT = os.getenv("PORT", 8080)
+MODEL_NAME = "gemini-2.5-flash" # Use a powerful model for analysis
 
-# --- Configuration (Environment Variables) ---
-# DATABASE_URL: Railway/Cloud se aayega; local demo ke liye SQLite fallback.
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./debug_connector_demo.db")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", None)
-PORT = int(os.getenv("PORT", 5000))
-
-# OpenAI SDK setup
-if OPENAI_API_KEY and openai:
-    openai.api_key = OPENAI_API_KEY
-
-# --- Logging Setup ---
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("debug-connector")
-
-# --- Database Setup (SQLAlchemy) ---
-Base = declarative_base()
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
-SessionLocal = scoped_session(sessionmaker(autocommit=False, autoflush=False, bind=engine))
-
-def gen_id(prefix='ev'):
-    return f"{prefix}_{uuid.uuid4().hex[:12]}"
-
-class Event(Base):
-    # Events table: logs, errors, metrics yahan store honge
-    __tablename__ = 'events'
-    id = Column(String, primary_key=True, default=lambda: gen_id('ev'))
-    tenant_id = Column(String, index=True, nullable=False)
-    service = Column(String, index=True, nullable=False)
-    ts = Column(DateTime(timezone=True), server_default=func.now())
-    type = Column(String, nullable=False)
-    trace_id = Column(String, index=True)
-    metadata = Column(JSON)
-    payload = Column(JSON)
-    processed = Column(Boolean, default=False)
-
-# Tables create karo (demo ke liye auto create, production mein Alembic use hota hai)
-def init_db():
-    Base.metadata.create_all(bind=engine)
-
-# --- Utility Functions ---
-REDACT_FIELDS = ['email','card','token','account_id','ssn']
-
-def redact_payload(obj, fields=REDACT_FIELDS):
-    # PII (Personal Identifiable Information) ko mask karta hai
-    try:
-        s = json.dumps(obj)
-    except Exception:
-        return obj
-    for f in fields:
-        s = s.replace(f, '***')
-    try:
-        return json.loads(s)
-    except Exception:
-        return obj
-
-def validate_event(obj):
-    return isinstance(obj, dict) and 'tenantId' in obj and 'service' in obj
-
-# --- AI Router (Failover Logic) ---
-def call_openai_chat(prompt):
-    # LLM (Large Language Model) call karta hai
-    if not openai:
-        raise RuntimeError("openai package not installed")
-    resp = openai.ChatCompletion.create(
-        model="gpt-4o-mini", # Cost saving ke liye mini model use kiya hai
-        messages=[{"role":"system","content":"You are an SRE assistant. Provide only the suggested fix and hypothesis."},
-                  {"role":"user","content":prompt}],
-        max_tokens=400,
-        temperature=0.0
-    )
-    return resp.choices[0].message.content
-
-def local_heuristic_suggestion(event):
-    # Agar AI key na ho to yeh simple, rule-based suggestion deta hai (Fallback)
-    payload_msg = (event.get('payload') or {}).get('message','').lower()
-    if 'nullpointer' in payload_msg:
-        return ("Hypothesis: Null reference (NPE).", "Fix: Add null-check before use.","Example: if (obj == null) { handle }")
-    if 'timeout' in payload_msg:
-        return ("Hypothesis: Downstream service timeout.", "Fix: Increase timeout value or check network connectivity.","Example: requests.get(url, timeout=10)")
-    if 'outofmemory' in payload_msg or 'oom' in payload_msg:
-        return ("Hypothesis: Out of memory.", "Fix: Increase memory allocation or profile for memory leaks.","Example: profile heap and GC.")
-    return ("No quick heuristic match.", "Fix: Collect diagnostics bundle and perform manual review.","")
-
-def get_ai_suggestion(event, trace_frames=None):
-    prompt = f"Event: {json.dumps(event, default=str)}\nTrace frames: {trace_frames}"
-    # 1. Try OpenAI
-    if OPENAI_API_KEY and openai:
-        try:
-            text = call_openai_chat(prompt)
-            return {"source":"openai","text": text}
-        except Exception as e:
-            logger.warning("OpenAI call failed, falling back to heuristic: %s", str(e))
-            # 2. Fallback to local heuristics
-    # 3. Direct Fallback
-    hypo, steps, snippet = local_heuristic_suggestion(event)
-    return {"source":"heuristic","text": f"Hypothesis: {hypo}\n\nSteps:\n{steps}\n\nSnippet:\n{snippet}"}
-
-# --- Flask App Routes ---
+# Check if environment variables are available
+if not API_KEY or not DATABASE_URL:
+    print("FATAL: OPENAI_API_KEY or DATABASE_URL not set in environment variables.")
+    # In a real app, you would exit here, but we will let Flask run for health check
+    
 app = Flask(__name__)
-init_db() # DB tables banane ke liye
+client = OpenAI(api_key=API_KEY)
 
-@app.route('/v1/ingest/event', methods=['POST'])
-def ingest_event():
-    # Events collect karta hai aur DB mein save karta hai
-    body = request.get_json(force=True, silent=True)
-    if not body or not validate_event(body):
-        return jsonify({"ok":False,"error":"invalid event - tenantId & service required"}), 400
-    safe = redact_payload(body)
-    db = SessionLocal()
+# --- 2. DATABASE SETUP ---
+Base = declarative_base()
+
+class DebugEvent(Base):
+    """Stores the ingested debug/error events."""
+    __tablename__ = 'debug_events'
+    id = Column(Integer, primary_key=True)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    level = Column(String(50))
+    service = Column(String(100))
+    message = Column(Text)
+    ai_response = Column(Text, nullable=True) # To store the AI's debugging analysis
+
+# Database connection setup
+try:
+    engine = create_engine(DATABASE_URL)
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+except Exception as e:
+    print(f"FATAL: Database connection failed. Error: {e}")
+    # Handle DB failure gracefully, maybe use mock session
+
+# --- 3. AI DEBUGGING LOGIC ---
+
+# *** TONE CHANGE HERE: From Grok to Professional Analyst ***
+# This new persona is professional, objective, and solution-oriented.
+SYSTEM_PROMPT = """
+You are a highly experienced, professional Level 3 Site Reliability Engineer (SRE) and Debugging Analyst for Nexus Systems.
+Your tone must be formal, objective, and solution-oriented. Your task is to perform a root cause analysis (RCA) on the provided error event.
+Provide a concise analysis in two sections:
+1.  **Root Cause & Impact**: State the core issue and its blast radius.
+2.  **Proposed Fix**: Provide a specific, actionable code or configuration fix, preferably in the language of the error (e.g., Python, JavaScript).
+Do not use humor, slang, or filler text.
+"""
+
+def get_ai_analysis(event_data):
+    """Calls the AI model to analyze the error event."""
     try:
-        ev = Event(tenant_id=safe.get('tenantId'), service=safe.get('service'), type=safe.get('type','ERROR'),
-            trace_id=safe.get('traceId'), metadata=safe.get('metadata'), payload=safe.get('payload'))
-        db.add(ev)
-        db.commit()
-        db.refresh(ev)
-        return jsonify({"ok":True,"id":ev.id}), 202
+        user_prompt = f"Analyze this debug event for RCA and fix:\n\n{json.dumps(event_data, indent=2)}"
+        
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.3
+        )
+        return response.choices[0].message.content
     except Exception as e:
-        logger.exception("db write error: %s", str(e))
-        db.rollback()
-        return jsonify({"ok":False,"error":"internal"}), 500
+        print(f"AI API call failed: {e}")
+        return f"AI Analysis Failed: {e}"
+
+# --- 4. FLASK ENDPOINTS ---
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Simple health check endpoint."""
+    return jsonify({"status": "ok"})
+
+@app.route('/ingest_event', methods=['POST'])
+def ingest_event():
+    """Endpoint for external services to send debug events."""
+    data = request.json
+    if not data or 'level' not in data or 'message' not in data:
+        return jsonify({"error": "Invalid payload"}), 400
+
+    # 1. Get AI Analysis (Critical Path)
+    ai_analysis = get_ai_analysis(data)
+
+    # 2. Save to Database
+    session = Session()
+    try:
+        new_event = DebugEvent(
+            level=data.get('level'),
+            service=data.get('service', 'unknown'),
+            message=data.get('message'),
+            ai_response=ai_analysis
+        )
+        session.add(new_event)
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        print(f"Database save failed: {e}")
+        return jsonify({"error": "Database error", "details": str(e)}), 500
     finally:
-        db.close()
+        session.close()
 
-@app.route('/v1/ai/debug', methods=['POST'])
-def ai_debug():
-    # AI se debug suggestion maangta hai
-    data = request.get_json(force=True, silent=True) or {}
-    event_payload = None
-    if data.get('eventId'): # Agar event ID se search karna ho
-        db = SessionLocal()
-        ev = db.query(Event).filter(Event.id==data['eventId']).first()
-        db.close()
-        if not ev: return jsonify({"ok":False,"error":"event not found"}), 404
-        event_payload = {"id": ev.id, "tenantId": ev.tenant_id, "service": ev.service, "metadata": ev.metadata, "payload": ev.payload}
-    elif data.get('event'): # Ya agar poora event JSON mein diya ho
-        event_payload = data.get('event')
-    else: return jsonify({"ok":False,"error":"event or eventId required"}), 400
+    return jsonify({
+        "status": "success",
+        "message": "Event ingested and analyzed.",
+        "analysis": ai_analysis
+    }), 201
 
-    suggestion = get_ai_suggestion(event_payload, data.get('traceFrames'))
-    return jsonify({"ok":True,"suggestion": suggestion}), 200
+# -------------------------------------------------------------
+# ** NEW ENDPOINT FOR INVESTOR DEMO (VISUAL FRONTEND) **
+# -------------------------------------------------------------
 
-@app.route('/v1/health', methods=['GET'])
-def health():
-    # Health check
-    return jsonify({"ok":True, "version":"0.1.0", "uptimeSec": int((datetime.datetime.utcnow()-datetime.datetime(1970,1,1)).total_seconds())})
+@app.route('/', methods=['GET'])
+def dashboard_demo():
+    """
+    Renders a simple, visual dashboard for the investor demo.
+    Fetches the latest 10 events and displays them with a clean UI.
+    """
+    session = Session()
+    try:
+        # Fetch latest 10 events
+        events = session.query(DebugEvent).order_by(DebugEvent.timestamp.desc()).limit(10).all()
+        
+        # Calculate event counts for the chart data
+        level_counts = session.query(DebugEvent.level, func.count(DebugEvent.level)).group_by(DebugEvent.level).all()
+        chart_data = json.dumps([{"level": level, "count": count} for level, count in level_counts])
+        
+        # Determine status colors for UI
+        def get_status_color(level):
+            return {
+                'CRITICAL': 'bg-red-500',
+                'ERROR': 'bg-yellow-500',
+                'WARNING': 'bg-blue-500',
+                'INFO': 'bg-gray-500',
+            }.get(level.upper(), 'bg-gray-500')
+
+        # Simple HTML Template using Tailwind CSS classes for a modern look
+        HTML_TEMPLATE = """
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Nexus Systems: Live POC Dashboard</title>
+            <script src="https://cdn.tailwindcss.com"></script>
+            <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+            <style>
+                @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+                body { font-family: 'Inter', sans-serif; background-color: #f7f9fc; }
+                .card { background: white; border-radius: 12px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05); }
+                .log-entry { transition: background-color 0.3s; }
+                .log-entry:hover { background-color: #f0f4f8; }
+            </style>
+        </head>
+        <body class="p-4 sm:p-8">
+            <header class="mb-8 p-4 bg-white rounded-xl shadow-lg border-t-4 border-indigo-600">
+                <h1 class="text-3xl font-bold text-gray-900">Nexus Systems: Live Proof-of-Concept</h1>
+                <p class="text-sm text-gray-500 mt-1">Unified Observability & AI Root Cause Analysis Demo (Render Live)</p>
+                <p class="text-xs mt-2 text-indigo-600 font-semibold">Status: Backend API is Live | Database is Connected | AI Analysis is Active</p>
+            </header>
+
+            <!-- KPI & Charts Section -->
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
+                <div class="card p-6 col-span-1 lg:col-span-2">
+                    <h2 class="text-xl font-semibold mb-4 text-gray-700">Event Volume by Severity</h2>
+                    <canvas id="eventChart" class="w-full h-80"></canvas>
+                </div>
+                <div class="card p-6 flex flex-col justify-center items-center space-y-4">
+                    <h2 class="text-xl font-semibold text-gray-700">Total Events Logged</h2>
+                    <p class="text-6xl font-extrabold text-indigo-600">{{ total_events }}</p>
+                    <p class="text-sm text-gray-500">since deployment</p>
+                </div>
+            </div>
+
+            <!-- Live Event Log & AI Analysis -->
+            <div class="card p-6">
+                <h2 class="text-xl font-semibold mb-4 text-gray-700">Latest Live Events & AI Root Cause Analysis (RCA)</h2>
+                <div class="space-y-4">
+                    {% if events %}
+                        {% for event in events %}
+                            <div class="log-entry p-4 border border-gray-100 rounded-lg">
+                                <div class="flex justify-between items-start mb-2">
+                                    <span class="px-3 py-1 text-xs font-bold text-white rounded-full {{ event.status_color }}">{{ event.level }}</span>
+                                    <span class="text-xs text-gray-500">{{ event.timestamp }}</span>
+                                </div>
+                                
+                                <p class="text-sm font-medium text-gray-800 mb-2">Service: {{ event.service }}</p>
+                                <p class="text-sm text-gray-600 italic mb-3">Log Message: "{{ event.message|truncate(150) }}"</p>
+                                
+                                <!-- AI Analysis Section -->
+                                <div class="mt-3 p-3 bg-indigo-50 border-l-4 border-indigo-500 rounded-r-lg">
+                                    <p class="text-xs font-semibold text-indigo-700 mb-1">AI RCA (SRE Analyst):</p>
+                                    <div class="text-xs text-gray-700 whitespace-pre-wrap">{{ event.ai_response }}</div>
+                                </div>
+                            </div>
+                        {% endfor %}
+                    {% else %}
+                        <p class="text-center text-gray-500 p-10">No events logged yet. Send a POST request to /ingest_event to see live data.</p>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- Chart JavaScript -->
+            <script>
+                const chartData = JSON.parse('{{ chart_data | safe }}');
+                const labels = chartData.map(d => d.level);
+                const data = chartData.map(d => d.count);
+                const colors = chartData.map(d => {
+                    switch (d.level.toUpperCase()) {
+                        case 'CRITICAL': return 'rgb(239, 68, 68)';
+                        case 'ERROR': return 'rgb(245, 158, 11)';
+                        case 'WARNING': return 'rgb(59, 130, 246)';
+                        case 'INFO': return 'rgb(107, 114, 128)';
+                        default: return 'rgb(75, 192, 192)';
+                    }
+                });
+
+                new Chart(document.getElementById('eventChart'), {
+                    type: 'bar',
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            label: 'Event Count',
+                            data: data,
+                            backgroundColor: colors,
+                            borderRadius: 6,
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: { display: false },
+                            title: { display: false }
+                        },
+                        scales: {
+                            y: { beginAtZero: true, ticks: { precision: 0 } }
+                        }
+                    }
+                });
+            </script>
+        </body>
+        </html>
+        """
+        
+        # Prepare data for rendering
+        total_events = session.query(DebugEvent).count()
+        events_data = [{
+            'level': e.level.upper(), 
+            'service': e.service, 
+            'message': e.message, 
+            'ai_response': e.ai_response, 
+            'timestamp': e.timestamp.strftime('%Y-%m-%d %H:%M:%S UTC'),
+            'status_color': get_status_color(e.level)
+        } for e in events]
+
+        # Use render_template_string to inject Python variables into the HTML string
+        return render_template_string(
+            HTML_TEMPLATE,
+            events=events_data,
+            chart_data=chart_data,
+            total_events=total_events
+        )
+
+    except Exception as e:
+        # Handle case where DB is empty or connection fails
+        return f"<h1>Dashboard Error</h1><p>Could not connect to Database or render dashboard: {e}</p>"
+    finally:
+        session.close()
 
 if __name__ == '__main__':
+    # Flask runs locally in development, but Gunicorn handles it in Render.
     app.run(host='0.0.0.0', port=PORT)

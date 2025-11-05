@@ -1,6 +1,6 @@
-Flask
-SQLAlchemy
+Flask>=2.2
+SQLAlchemy>=1.4
+psycopg2-binary
+gunicorn
 python-dotenv
 openai
-gunicorn
-psycopg2-binary

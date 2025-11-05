@@ -1,24 +1,21 @@
 import os
 import json
 from flask import Flask, request, jsonify, render_template_string
+# IMPORTANT: Added 'func' import for chart data calculation
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, func
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
 from datetime import datetime
-from openai import OpenAI # Using OpenAI library to leverage any Gemini model via API key
+from openai import OpenAI 
 
 # --- 1. CONFIGURATION ---
-# Use 'GEMINI_API_KEY' for better compatibility if you are using the Google GenAI SDK
-# But since we are using 'openai' library for simplicity, we stick to OPENAI_API_KEY
 API_KEY = os.getenv("OPENAI_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
 PORT = os.getenv("PORT", 8080)
-MODEL_NAME = "gemini-2.5-flash" # Use a powerful model for analysis
+MODEL_NAME = "gemini-2.5-flash" 
 
-# Check if environment variables are available
 if not API_KEY or not DATABASE_URL:
     print("FATAL: OPENAI_API_KEY or DATABASE_URL not set in environment variables.")
-    # In a real app, you would exit here, but we will let Flask run for health check
     
 app = Flask(__name__)
 client = OpenAI(api_key=API_KEY)
@@ -34,21 +31,20 @@ class DebugEvent(Base):
     level = Column(String(50))
     service = Column(String(100))
     message = Column(Text)
-    ai_response = Column(Text, nullable=True) # To store the AI's debugging analysis
+    ai_response = Column(Text, nullable=True) 
 
 # Database connection setup
+Session = None # Initialize Session globally
 try:
     engine = create_engine(DATABASE_URL)
     Base.metadata.create_all(engine)
-    Session = sessionmaker(bind=engine)
+    # Define Session Class here, making it accessible to all functions
+    Session = sessionmaker(bind=engine) 
 except Exception as e:
     print(f"FATAL: Database connection failed. Error: {e}")
-    # Handle DB failure gracefully, maybe use mock session
+    # Handle DB failure gracefully
 
 # --- 3. AI DEBUGGING LOGIC ---
-
-# *** TONE CHANGE HERE: From Grok to Professional Analyst ***
-# This new persona is professional, objective, and solution-oriented.
 SYSTEM_PROMPT = """
 You are a highly experienced, professional Level 3 Site Reliability Engineer (SRE) and Debugging Analyst for Nexus Systems.
 Your tone must be formal, objective, and solution-oriented. Your task is to perform a root cause analysis (RCA) on the provided error event.
@@ -60,6 +56,10 @@ Do not use humor, slang, or filler text.
 
 def get_ai_analysis(event_data):
     """Calls the AI model to analyze the error event."""
+    # Check if API key is set before calling the client
+    if not API_KEY:
+        return "AI Analysis Skipped: OPENAI_API_KEY not configured."
+        
     try:
         user_prompt = f"Analyze this debug event for RCA and fix:\n\n{json.dumps(event_data, indent=2)}"
         
@@ -86,11 +86,15 @@ def health_check():
 @app.route('/ingest_event', methods=['POST'])
 def ingest_event():
     """Endpoint for external services to send debug events."""
+    # Check if Session is defined (i.e., DB connection was successful)
+    if Session is None:
+        return jsonify({"error": "Database is not configured or connected."}), 503
+        
     data = request.json
     if not data or 'level' not in data or 'message' not in data:
         return jsonify({"error": "Invalid payload"}), 400
 
-    # 1. Get AI Analysis (Critical Path)
+    # 1. Get AI Analysis 
     ai_analysis = get_ai_analysis(data)
 
     # 2. Save to Database
@@ -127,6 +131,10 @@ def dashboard_demo():
     Renders a simple, visual dashboard for the investor demo.
     Fetches the latest 10 events and displays them with a clean UI.
     """
+    # Check if Session is defined (i.e., DB connection was successful)
+    if Session is None:
+        return "<h1>Dashboard Error</h1><p>Database is not configured or connected. Please check DATABASE_URL variable.</p>"
+
     session = Session()
     try:
         # Fetch latest 10 events
@@ -280,5 +288,4 @@ def dashboard_demo():
         session.close()
 
 if __name__ == '__main__':
-    # Flask runs locally in development, but Gunicorn handles it in Render.
     app.run(host='0.0.0.0', port=PORT)

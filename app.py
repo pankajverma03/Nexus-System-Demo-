@@ -70,7 +70,7 @@ def dashboard():
         if SessionLocal:
             with SessionLocal() as db:
                 # quick lightweight query to validate connection (SQLite or Postgres)
-                _ = db.execute("SELECT 1").fetchone()
+                _ = db.execute(text("SELECT 1")).fetchone()
                 snapshot["db"] = True
                 snapshot["ok"] = True
     except Exception as e:
@@ -93,7 +93,7 @@ def health():
     try:
         if SessionLocal:
             with SessionLocal() as db:
-                _ = db.execute("SELECT 1").fetchone()
+                _ = db.execute(text("SELECT 1")).fetchone()
                 ok = True
     except Exception:
         ok = False

@@ -1,6 +1,7 @@
 # app.py - Nexus System (startup-safe, demo-friendly)
 from flask import Flask, render_template, request, jsonify
 from datetime import datetime
+from sqlalchemy import text
 import os
 import logging
 

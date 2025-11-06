@@ -5,7 +5,7 @@ from sqlalchemy import text
 import os
 import logging
 
-# Create Flask app FIRST (must exist before routes)
+# create app FIRST (must exist before any route definitions)
 app = Flask(__name__)
 app.logger.setLevel(logging.INFO)
 
@@ -14,12 +14,17 @@ SessionLocal = None
 engine = None
 
 def init_db_engine():
+    """
+    Try to import engine from db.py (production).
+    If that fails, create an in-memory SQLite fallback (demo mode).
+    This function is idempotent.
+    """
     global engine, SessionLocal
     if engine is not None and SessionLocal is not None:
         return
 
     try:
-        # Try to import engine from db.py (production path)
+        # production path (if present)
         from db import engine as imported_engine
         from sqlalchemy.orm import sessionmaker as _sessionmaker
         engine = imported_engine
@@ -29,7 +34,7 @@ def init_db_engine():
     except Exception as e:
         app.logger.warning(f"db import failed at startup: {e}")
 
-    # Fallback: lightweight in-memory SQLite for demo (no persistence)
+    # fallback: in-memory SQLite (demo-only, no persistence)
     try:
         from sqlalchemy import create_engine
         from sqlalchemy.orm import sessionmaker as _sessionmaker
@@ -41,10 +46,9 @@ def init_db_engine():
         engine = None
         SessionLocal = None
 
-# Delay heavy imports (ai_router) until runtime to avoid startup crash
+# Delay heavy import of ai_router until runtime to avoid startup crash
 analyze_event_ai = None
 try:
-    # try import but tolerate failure
     from ai_router import analyze_event_ai as _analyze
     analyze_event_ai = _analyze
     app.logger.info("ai_router imported successfully")
@@ -55,21 +59,19 @@ except Exception as e:
 # --- Dashboard (simple demo UI, templates/dashboard.html) ---
 @app.route('/')
 def dashboard():
-    # ensure DB engine available (non-blocking)
     init_db_engine()
 
-    # simulated snapshot + alerts for demo
     snapshot = {
         "time": datetime.utcnow().isoformat(),
         "ok": False,
         "db": False,
     }
 
-    # quick readability DB check (best-effort)
+    # best-effort DB quick-check (non-blocking)
     try:
         if SessionLocal:
             with SessionLocal() as db:
-                # quick lightweight query to validate connection (SQLite or Postgres)
+                # SQLAlchemy prefers text() for raw SQL
                 _ = db.execute(text("SELECT 1")).fetchone()
                 snapshot["db"] = True
                 snapshot["ok"] = True
@@ -99,28 +101,54 @@ def health():
         ok = False
     return jsonify(status='ok' if ok else 'degraded', db=bool(SessionLocal and ok)), 200
 
-# --- Sample create event endpoint for demo (UI button) ---
-@app.route('/api/create_sample', methods=['POST'])
+# --- create / persist a sample event for demo (GET/POST) ---
+@app.route('/api/create_sample', methods=['GET', 'POST'])
 def create_sample():
-    # lightweight sample event payload (no persistence if DB not ready)
+    """
+    Create a demo sample event. Try to persist if DB is ready,
+    but always return the sample JSON to the client (non-blocking).
+    """
     init_db_engine()
+    import random, time
     sample = {
-        "id": "ev_demo_1",
+        "id": f"ev_demo_{int(time.time())}_{random.randint(100,999)}",
         "payload": {"message": "simulated error: connection reset", "code": 502},
         "meta_info": {"service": "demo-service", "tenant": "demo"}
     }
     try:
         if SessionLocal:
-            from models import Event  # local import to avoid startup issues
+            # local import to avoid startup-time circular issues
+            from models import Event
             with SessionLocal() as db:
+                # adjust column name used in your models: meta_info or metadata
                 ev = Event(id=sample["id"], payload=sample["payload"], meta_info=sample["meta_info"])
                 db.add(ev)
                 db.commit()
     except Exception as e:
         app.logger.warning(f"Create-sample persistence failed: {e}")
+
     return jsonify(ok=True, event=sample), 200
 
-# --- AI suggest endpoint (uses analyze_event_ai if available, else simple heuristic) ---
+# --- route: metrics (GET) ---
+@app.route('/api/metrics', methods=['GET'])
+def api_metrics():
+    import random, time
+    now = int(time.time())
+    labels = []
+    cpu = []
+    mem = []
+    for i in range(10):
+        labels.append(now - (9 - i) * 5)
+        cpu.append(round(random.uniform(10, 50), 2))
+        mem.append(round(random.uniform(20, 70), 2))
+    return jsonify({
+        "ok": True,
+        "time": datetime.utcnow().isoformat(),
+        "series": {"labels": labels, "cpu": cpu, "mem": mem},
+        "db": True if SessionLocal else False
+    })
+
+# --- AI suggest endpoint (uses analyze_event_ai if available, else local heuristic) ---
 @app.route('/api/ai/suggest', methods=['POST'])
 def api_ai_suggest():
     init_db_engine()
@@ -131,32 +159,31 @@ def api_ai_suggest():
 
     event_payload = None
     event_meta = None
+    # Try to fetch event from DB (best-effort)
     try:
         if SessionLocal:
             from models import Event
             with SessionLocal() as db:
                 ev = db.query(Event).filter_by(id=event_id).first()
                 if ev:
-                    event_payload = ev.payload
+                    event_payload = getattr(ev, "payload", None)
                     event_meta = getattr(ev, "meta_info", None)
     except Exception as e:
         app.logger.warning(f"Failed to read event from DB: {e}")
 
-    # Use ai_router if available
+    # Use ai_router if available; else fallback to simple heuristic
     if analyze_event_ai:
         try:
             res = analyze_event_ai(event_id=event_id, event_payload=event_payload, event_meta=event_meta)
         except Exception as e:
             app.logger.warning(f"analyze_event_ai failed at runtime: {e}")
-            analyze_local = None
             res = {"analysis": "ai runtime error", "suggestion": "AI unavailable", "provider": "none"}
     else:
-        # Simple local heuristic fallback (demo)
         summary = f"Event {event_id}: local-heuristic analysis"
         suggestion = "Check network connectivity and restart the affected node."
         res = {"analysis": summary, "suggestion": suggestion, "provider": "local-heuristic"}
 
-    # optional persist suggestion
+    # optional persist suggestion (best-effort)
     try:
         if SessionLocal:
             from models import AISuggestion

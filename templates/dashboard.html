@@ -1,274 +1,189 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Nexus Demo — Dashboard</title>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Nexus System — Demo</title>
 
-  <!-- Tailwind CDN (quick demo) -->
+  <!-- Tailwind -->
   <script src="https://cdn.tailwindcss.com"></script>
-  <style>
-    /* small custom dark tweaks */
-    :root { color-scheme: dark; }
-    body { background: #0b1220; color: #cbd5e1; }
-    .card { background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)); box-shadow: 0 6px 24px rgba(2,6,23,0.6); border: 1px solid rgba(255,255,255,0.03); }
-    .muted { color: #94a3b8; }
-    .positive { color: #34d399; } /* green */
-    .warn { color: #f59e0b; } /* amber */
-    .danger { color: #fb7185; } /* red */
-  </style>
-
-  <!-- Chart.js CDN -->
+  <!-- Chart.js -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <!-- Font + Glow CSS -->
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet"/>
+  <style>
+    body { background-color: #0a0f1c; color: #cbd5e1; font-family: 'Inter', sans-serif; }
+    .card { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); box-shadow: 0 0 18px rgba(0,255,255,0.05); border-radius: 1rem; transition: all 0.3s ease; }
+    .card:hover { box-shadow: 0 0 28px rgba(0,255,255,0.15); transform: translateY(-2px); }
+    .glow { text-shadow: 0 0 12px rgba(0,255,255,0.4); color: #67e8f9; }
+    .muted { color: #94a3b8; }
+    .btn-primary { background: linear-gradient(90deg,#0ea5e9,#06b6d4); color:white; font-weight:600; border-radius:0.5rem; padding:0.6rem 1rem; transition: all 0.2s ease; }
+    .btn-primary:hover { opacity:0.9; box-shadow:0 0 14px rgba(6,182,212,0.5); }
+    .btn-secondary { border:1px solid rgba(255,255,255,0.1); color:#cbd5e1; border-radius:0.5rem; padding:0.6rem 1rem; }
+  </style>
 </head>
+
 <body class="antialiased">
-  <div class="max-w-6xl mx-auto p-6">
-    <header class="flex items-center justify-between mb-6">
+  <div class="max-w-7xl mx-auto p-6 space-y-6">
+    <header class="flex items-center justify-between">
       <div>
-        <h1 class="text-2xl font-semibold text-white">Nexus System — Demo</h1>
+        <h1 class="text-3xl font-semibold glow">Nexus System — Demo</h1>
         <p class="muted text-sm">AI Debug Assistant • Live demo</p>
       </div>
-      <div class="flex items-center space-x-3">
-        <button id="btn-create" class="px-4 py-2 bg-sky-600 text-white rounded shadow">Create sample event</button>
-        <button id="btn-refresh" class="px-4 py-2 border border-slate-700 text-slate-200 rounded">Refresh</button>
+      <div class="flex space-x-3">
+        <button id="btn-create" class="btn-primary">Create Sample Event</button>
+        <button id="btn-refresh" class="btn-secondary">Refresh</button>
       </div>
     </header>
 
-    <!-- Top cards -->
-    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-      <div class="card p-4 rounded-lg">
-        <div class="flex justify-between items-start">
-          <div>
-            <div class="text-sm muted">Uptime</div>
-            <div class="text-2xl font-bold positive" id="uptime">—</div>
-          </div>
-          <div class="text-right">
-            <div class="text-sm muted">Active Alerts</div>
-            <div class="text-xl font-semibold warn" id="alerts-count">—</div>
-          </div>
-        </div>
-        <div class="mt-3 muted text-sm">Quick status summary</div>
+    <!-- Metrics cards -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div class="card p-4">
+        <div class="text-sm muted">Uptime</div>
+        <div class="text-3xl font-bold text-emerald-400" id="uptime">—</div>
+        <div class="text-sm muted mt-2">Active Alerts: <span id="alerts-count" class="text-amber-400">—</span></div>
       </div>
-
-      <div class="card p-4 rounded-lg">
+      <div class="card p-4">
         <div class="text-sm muted">Avg API Latency</div>
-        <div class="text-2xl font-bold" id="latency">— ms</div>
-        <div class="mt-3">
-          <canvas id="chart-cpu" height="100"></canvas>
-        </div>
+        <div class="text-3xl font-bold text-sky-400" id="latency">— ms</div>
+        <canvas id="chart-cpu" height="100" class="mt-2"></canvas>
       </div>
-
-      <div class="card p-4 rounded-lg">
+      <div class="card p-4">
         <div class="text-sm muted">Error Rate</div>
-        <div class="text-2xl font-bold danger" id="error-rate">—</div>
-        <div class="mt-3 muted text-sm">Recent incidents</div>
-        <ul id="recent-incidents" class="mt-2 text-sm space-y-1"></ul>
+        <div class="text-3xl font-bold text-rose-400" id="error-rate">—%</div>
+        <canvas id="chart-mem" height="100" class="mt-2"></canvas>
       </div>
     </div>
 
-    <!-- Main grid: left charts, right AI panel -->
+    <!-- Charts and Events -->
     <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
       <div class="lg:col-span-2 space-y-4">
-        <div class="card p-4 rounded-lg">
-          <div class="flex items-center justify-between">
-            <div>
-              <h2 class="text-lg font-semibold">API Performance Trends</h2>
-              <div class="muted text-sm">Last few samples</div>
-            </div>
-            <div class="muted text-sm">Auto-updating demo</div>
-          </div>
-          <div class="mt-4">
-            <canvas id="chart-trend" height="120"></canvas>
-          </div>
+        <div class="card p-4">
+          <h2 class="text-lg font-semibold">API Performance Trends</h2>
+          <p class="muted text-sm">Live CPU & Memory samples</p>
+          <canvas id="chart-trend" height="120" class="mt-3"></canvas>
         </div>
 
-        <div class="card p-4 rounded-lg">
-          <h3 class="text-lg font-semibold">Events Table (recent)</h3>
-          <div class="mt-3">
-            <table class="w-full text-sm">
-              <thead class="text-left muted text-xs">
-                <tr><th>ID</th><th>Type</th><th>Message</th><th>Time</th></tr>
-              </thead>
-              <tbody id="events-table" class="divide-y divide-slate-700"></tbody>
-            </table>
-          </div>
+        <div class="card p-4">
+          <h2 class="text-lg font-semibold">Events Table</h2>
+          <table class="w-full text-sm mt-3">
+            <thead class="text-left muted text-xs border-b border-slate-700">
+              <tr><th>ID</th><th>Type</th><th>Message</th><th>Time</th></tr>
+            </thead>
+            <tbody id="events-table" class="divide-y divide-slate-800"></tbody>
+          </table>
         </div>
       </div>
 
+      <!-- Right column -->
       <aside class="space-y-4">
-        <div class="card p-4 rounded-lg">
+        <div class="card p-4">
           <h3 class="text-lg font-semibold">AI Insights</h3>
-          <p class="muted text-sm">Suggestions generated by demo AI / local heuristic</p>
-          <div id="ai-suggestions" class="mt-3 space-y-3"></div>
+          <div id="ai-suggestions" class="mt-3 space-y-3 text-sm"></div>
         </div>
 
-        <div class="card p-4 rounded-lg">
+        <div class="card p-4">
           <h3 class="text-lg font-semibold">Ask AI (quick)</h3>
-          <textarea id="ai-input" rows="3" class="w-full p-2 bg-slate-900 rounded text-sm" placeholder="Paste event id or message..."></textarea>
-          <div class="mt-2 flex gap-2">
-            <button id="btn-ask" class="px-3 py-2 bg-emerald-600 rounded text-white">Ask AI</button>
-            <button id="btn-clear" class="px-3 py-2 border rounded text-sm muted">Clear</button>
+          <textarea id="ai-input" rows="3" class="w-full bg-slate-900 rounded p-2 text-sm mt-2" placeholder="Type event id or question..."></textarea>
+          <div class="mt-2 flex space-x-2">
+            <button id="btn-ask" class="btn-primary flex-1">Ask AI</button>
+            <button id="btn-clear" class="btn-secondary flex-1">Clear</button>
           </div>
           <div id="ai-response" class="mt-3 text-sm muted"></div>
         </div>
       </aside>
     </div>
 
-    <footer class="mt-6 muted text-sm">
-      Nexus Demo • For investor presentation only — data simulated.
-    </footer>
+    <footer class="text-center muted text-xs mt-8">© Nexus System — Demo build for investors • Powered by Flask + OpenAI</footer>
   </div>
 
-<script>
-  // Helper: fetch JSON with error handling
-  async function jfetch(url, opts) {
-    try {
-      const res = await fetch(url, opts || {});
-      return await res.json();
-    } catch (e) {
-      console.warn("fetch failed", url, e);
-      return null;
-    }
-  }
+  <script>
+    let trendChart, cpuChart, memChart;
+    function initCharts() {
+      const ctxTrend = document.getElementById("chart-trend").getContext("2d");
+      trendChart = new Chart(ctxTrend, {
+        type: "line",
+        data: { labels: [], datasets: [{ label: "CPU %", data: [], borderColor: "#06b6d4", tension: 0.4, fill: true }] },
+        options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
+      });
 
-  // Chart objects
-  let trendChart = null, cpuChart = null;
+      cpuChart = new Chart(document.getElementById("chart-cpu"), {
+        type: "bar",
+        data: { labels: [], datasets: [{ label: "Latency", data: [], backgroundColor: "#0ea5e9" }] },
+        options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
+      });
 
-  function initCharts() {
-    const ctx = document.getElementById('chart-trend').getContext('2d');
-    trendChart = new Chart(ctx, {
-      type: 'line',
-      data: { labels: [], datasets: [{ label: 'CPU %', data: [], tension: 0.3, fill: true }] },
-      options: { plugins: { legend: { display: false } }, scales: { x: { display: false }, y: { beginAtZero: true } } }
-    });
-
-    const ctx2 = document.getElementById('chart-cpu').getContext('2d');
-    cpuChart = new Chart(ctx2, {
-      type: 'bar',
-      data: { labels: [], datasets: [{ label: 'Mem %', data: [] }] },
-      options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
-    });
-  }
-
-  // Update UI from /api/metrics
-  async function refreshMetrics() {
-    const m = await jfetch('/api/metrics');
-    if (!m || !m.ok) return;
-    // uptime & quick cards
-    document.getElementById('uptime').innerText = Math.round(99 + Math.random() * 0.99) + '%';
-    document.getElementById('latency').innerText = Math.round(100 + Math.random() * 200) + ' ms';
-    document.getElementById('alerts-count').innerText = Math.floor(Math.random() * 10);
-
-    // trend chart: use metrics if provided
-    const labels = (m.series && m.series.labels) ? m.series.labels.map(t => new Date(t*1000).toLocaleTimeString()) : Array.from({length:10}, (_,i)=>i);
-    const cpu = (m.series && m.series.cpu) ? m.series.cpu : Array.from({length:10}, ()=>Math.round(10+Math.random()*60));
-    const mem = (m.series && m.series.mem) ? m.series.mem : Array.from({length:10}, ()=>Math.round(20+Math.random()*70));
-
-    if (trendChart) {
-      trendChart.data.labels = labels;
-      trendChart.data.datasets[0].data = cpu;
-      trendChart.update();
-    }
-    if (cpuChart) {
-      cpuChart.data.labels = labels;
-      cpuChart.data.datasets[0].data = mem;
-      cpuChart.update();
+      memChart = new Chart(document.getElementById("chart-mem"), {
+        type: "bar",
+        data: { labels: [], datasets: [{ label: "Errors", data: [], backgroundColor: "#f43f5e" }] },
+        options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
+      });
     }
 
-    // events demo: fetch recent events by calling /api/ingest? (we will also fetch events stored)
-    // We will try reading 'events' from the /api/create_sample result (create_sample persists).
-    const eventsTbl = document.getElementById('events-table');
-    eventsTbl.innerHTML = '';
-    try {
-      // Try reading seeded events by calling a backend read route; if not available, show synthetic
-      // We will try /api/metrics response to show db status
-      if (m.db) {
-        // Try to list recent events using a simple approach: call /api/create_sample (this returns event payload only)
-        // Instead we simulate a list using the seeded demo ids:
-        const demoIds = ['ev_demo_1','ev_demo_2','ev_demo_3','ev_demo_4','ev_demo_5'];
-        demoIds.forEach(id => {
-          const tr = document.createElement('tr');
-          tr.innerHTML = `<td class="py-2 text-xs">${id}</td><td class="py-2 text-xs">INFO</td><td class="py-2 text-xs muted">Demo event message for ${id}</td><td class="py-2 text-xs muted">now</td>`;
-          eventsTbl.appendChild(tr);
-        });
-      } else {
-        // Synthetic fallback rows
-        for (let i=0;i<5;i++) {
-          const tr = document.createElement('tr');
-          tr.innerHTML = `<td class="py-2 text-xs">demo_${i}</td><td class="py-2 text-xs">WARN</td><td class="py-2 text-xs muted">No DB: showing synthetic</td><td class="py-2 text-xs muted">-</td>`;
-          eventsTbl.appendChild(tr);
-        }
+    async function jfetch(url, opts) {
+      try { const r = await fetch(url, opts); return await r.json(); }
+      catch (e) { console.warn("fetch failed", e); return null; }
+    }
+
+    async function refreshMetrics() {
+      const m = await jfetch("/api/metrics");
+      if (!m || !m.ok) return;
+      document.getElementById("uptime").innerText = Math.round(99 + Math.random()*0.9) + "%";
+      document.getElementById("latency").innerText = Math.round(100+Math.random()*200) + " ms";
+      document.getElementById("error-rate").innerText = Math.round(Math.random()*5) + "%";
+      document.getElementById("alerts-count").innerText = Math.floor(Math.random()*8);
+
+      const labels = m.series.labels.map(t=> new Date(t*1000).toLocaleTimeString());
+      const cpu = m.series.cpu;
+      const mem = m.series.mem;
+      trendChart.data.labels = labels; trendChart.data.datasets[0].data = cpu; trendChart.update();
+      cpuChart.data.labels = labels; cpuChart.data.datasets[0].data = cpu.map(v=>v/2); cpuChart.update();
+      memChart.data.labels = labels; memChart.data.datasets[0].data = mem.map(v=>v/3); memChart.update();
+
+      const tbl = document.getElementById("events-table");
+      tbl.innerHTML = "";
+      ["ev_demo_1","ev_demo_2","ev_demo_3","ev_demo_4","ev_demo_5"].forEach((id,i)=>{
+        tbl.innerHTML += `<tr><td>${id}</td><td>${["ERROR","WARN","INFO"][i%3]}</td><td class="muted">Demo message ${i+1}</td><td>now</td></tr>`;
+      });
+    }
+
+    async function refreshAISuggestions() {
+      const r = await jfetch("/api/ai/suggestions");
+      const box = document.getElementById("ai-suggestions");
+      box.innerHTML = "";
+      if (!r || !r.ok || !r.suggestions.length) {
+        box.innerHTML = `<div class='muted'>No suggestions yet. Create an event.</div>`;
+        return;
       }
-    } catch (e) {
-      console.warn(e);
+      r.suggestions.forEach(s=>{
+        box.innerHTML += `<div class='border border-slate-700 rounded p-2'>
+          <div class='font-semibold text-cyan-400'>${s.title}</div>
+          <div class='muted text-xs mt-1'>${s.body}</div>
+        </div>`;
+      });
     }
-  }
 
-  // Fetch and display AI suggestions
-  async function refreshAISuggestions() {
-    const res = await jfetch('/api/ai/suggestions');
-    const panel = document.getElementById('ai-suggestions');
-    panel.innerHTML = '';
-    if (!res || !res.ok || !res.suggestions) {
-      panel.innerHTML = `<div class="muted text-sm">No suggestions yet. Create an event to generate one.</div>`;
-      return;
+    async function setupUI(){
+      document.getElementById("btn-create").onclick = async()=>{
+        await jfetch("/api/ingest",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({event_type:"ERROR",message:"Manual test event"})});
+        await refreshAISuggestions(); await refreshMetrics();
+      };
+      document.getElementById("btn-refresh").onclick = async()=>{await refreshMetrics(); await refreshAISuggestions();};
+      document.getElementById("btn-ask").onclick = async()=>{
+        const val=document.getElementById("ai-input").value||"ev_demo_1";
+        const res=await jfetch("/api/ai/suggest",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({event_id:val})});
+        const out=document.getElementById("ai-response");
+        if(res&&res.ok){out.innerHTML=`<span class='text-cyan-400 font-semibold'>[${res.provider}]</span> ${res.suggestion}`; await refreshAISuggestions();}
+        else out.innerText="AI unavailable";
+      };
+      document.getElementById("btn-clear").onclick=()=>{document.getElementById("ai-input").value="";document.getElementById("ai-response").innerText="";};
     }
-    res.suggestions.forEach(s => {
-      const d = document.createElement('div');
-      d.className = 'p-3 rounded border border-slate-700';
-      d.innerHTML = `<div class="font-semibold">${escapeHtml(s.title)}</div><div class="muted text-xs mt-1">${escapeHtml(s.body)}</div><div class="muted text-xs mt-1">${escapeHtml(s.created_at)}</div>`;
-      panel.appendChild(d);
-    });
-  }
 
-  function escapeHtml(str){ return (''+str).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-
-  // Wire UI buttons
-  async function setupUI() {
-    document.getElementById('btn-create').addEventListener('click', async () => {
-      const res = await jfetch('/api/ingest', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({event_type: 'ERROR', message: 'Manual test event from Pankaj'})});
-      if (res && res.ok) {
-        alert('Event created: ' + res.event_id);
-        await refreshAISuggestions();
-        await refreshMetrics();
-      } else {
-        alert('Failed to create event (see console).');
-      }
-    });
-
-    document.getElementById('btn-refresh').addEventListener('click', async () => {
-      await refreshMetrics();
-      await refreshAISuggestions();
-    });
-
-    document.getElementById('btn-ask').addEventListener('click', async () => {
-      const txt = document.getElementById('ai-input').value || 'ev_demo_1';
-      const payload = { event_id: txt };
-      const res = await jfetch('/api/ai/suggest', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
-      const out = document.getElementById('ai-response');
-      if (res && res.ok) {
-        out.innerHTML = `<div class="font-semibold">[${res.provider || 'demo'}]</div><div class="muted text-sm">${escapeHtml(res.suggestion || res.analysis || '')}</div>`;
-        await refreshAISuggestions();
-      } else {
-        out.innerText = 'AI request failed';
-      }
-    });
-
-    document.getElementById('btn-clear').addEventListener('click', () => {
-      document.getElementById('ai-input').value = '';
-      document.getElementById('ai-response').innerHTML = '';
-    });
-  }
-
-  // Init page
-  (function () {
-    initCharts();
-    setupUI();
-    refreshMetrics();
-    refreshAISuggestions();
-    // auto refresh
-    setInterval(async () => { await refreshMetrics(); await refreshAISuggestions(); }, 8000);
-  })();
-</script>
+    (function(){
+      initCharts(); setupUI(); refreshMetrics(); refreshAISuggestions();
+      setInterval(()=>{refreshMetrics(); refreshAISuggestions();},10000);
+    })();
+  </script>
 </body>
 </html>

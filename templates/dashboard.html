@@ -1,303 +1,274 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Nexus — Enterprise Dashboard (Demo)</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Nexus Demo — Dashboard</title>
 
-  <!-- Bootstrap 5 (CDN) -->
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet"/>
-
-  <!-- Chart.js (CDN) -->
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-
+  <!-- Tailwind CDN (quick demo) -->
+  <script src="https://cdn.tailwindcss.com"></script>
   <style>
-    body { background:#f4f6f9; }
-    .card { border-radius:10px; box-shadow:0 2px 6px rgba(15,20,30,0.06); }
-    .stat-small { font-weight:700; font-size:1.05rem; }
-    .spark-canvas { height:48px !important; }
-    .ai-panel { position: sticky; top: 1rem; }
-    .badge-sev-critical { background:#ff4d4f; color:white; }
-    .badge-sev-warning { background:#ffb020; color:#000; }
-    .badge-sev-info { background:#5b8def; color:white; }
-    .muted-small { color:#6c757d;font-size:.9rem; }
+    /* small custom dark tweaks */
+    :root { color-scheme: dark; }
+    body { background: #0b1220; color: #cbd5e1; }
+    .card { background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)); box-shadow: 0 6px 24px rgba(2,6,23,0.6); border: 1px solid rgba(255,255,255,0.03); }
+    .muted { color: #94a3b8; }
+    .positive { color: #34d399; } /* green */
+    .warn { color: #f59e0b; } /* amber */
+    .danger { color: #fb7185; } /* red */
   </style>
+
+  <!-- Chart.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
-<body>
-<nav class="navbar navbar-dark bg-dark mb-3">
-  <div class="container-fluid">
-    <a class="navbar-brand" href="#">Nexus System Dashboard — Demo</a>
-    <div class="text-white small">Enterprise look — Demo</div>
-  </div>
-</nav>
-
-<div class="container-fluid">
-  <div class="row gx-3">
-
-    <!-- LEFT: MAIN CONTENT (8) -->
-    <div class="col-lg-8">
-
-      <!-- TOP STATS ROW -->
-      <div class="row g-3 mb-3">
-        <div class="col-6 col-md-3">
-          <div class="card p-3">
-            <div class="d-flex justify-content-between">
-              <div>
-                <div class="muted-small">CPU</div>
-                <div class="stat-small" id="stat-cpu">—</div>
-              </div>
-              <canvas id="spark-cpu" class="spark-canvas"></canvas>
-            </div>
-            <div class="mt-2 muted-small">Latency: <span id="stat-latency">—</span></div>
-          </div>
-        </div>
-
-        <div class="col-6 col-md-3">
-          <div class="card p-3">
-            <div class="d-flex justify-content-between">
-              <div>
-                <div class="muted-small">Memory</div>
-                <div class="stat-small" id="stat-mem">—</div>
-              </div>
-              <canvas id="spark-mem" class="spark-canvas"></canvas>
-            </div>
-            <div class="mt-2 muted-small">Active: <span id="stat-active">—</span></div>
-          </div>
-        </div>
-
-        <div class="col-6 col-md-3">
-          <div class="card p-3">
-            <div class="d-flex justify-content-between">
-              <div>
-                <div class="muted-small">Disk%</div>
-                <div class="stat-small" id="stat-disk">—</div>
-              </div>
-              <canvas id="spark-disk" class="spark-canvas"></canvas>
-            </div>
-            <div class="mt-2 muted-small">Used: <span id="stat-dused">—</span> GB</div>
-          </div>
-        </div>
-
-        <div class="col-6 col-md-3">
-          <div class="card p-3">
-            <div class="d-flex justify-content-between">
-              <div>
-                <div class="muted-small">DB</div>
-                <div class="stat-small" id="stat-db">—</div>
-              </div>
-              <canvas id="spark-db" class="spark-canvas"></canvas>
-            </div>
-            <div class="mt-2 muted-small">Snapshot: <span id="stat-time">—</span></div>
-          </div>
-        </div>
+<body class="antialiased">
+  <div class="max-w-6xl mx-auto p-6">
+    <header class="flex items-center justify-between mb-6">
+      <div>
+        <h1 class="text-2xl font-semibold text-white">Nexus System — Demo</h1>
+        <p class="muted text-sm">AI Debug Assistant • Live demo</p>
       </div>
+      <div class="flex items-center space-x-3">
+        <button id="btn-create" class="px-4 py-2 bg-sky-600 text-white rounded shadow">Create sample event</button>
+        <button id="btn-refresh" class="px-4 py-2 border border-slate-700 text-slate-200 rounded">Refresh</button>
+      </div>
+    </header>
 
-      <!-- MAIN TIMESERIES + Controls -->
-      <div class="card p-3 mb-3">
-        <div class="d-flex justify-content-between align-items-center mb-2">
-          <div><h5 class="mb-0">CPU / Memory Over Time</h5><div class="muted-small">Last 10 points (demo)</div></div>
+    <!-- Top cards -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+      <div class="card p-4 rounded-lg">
+        <div class="flex justify-between items-start">
           <div>
-            <button class="btn btn-sm btn-outline-primary" id="expand-graph">Fullscreen</button>
-            <button class="btn btn-sm btn-outline-secondary" id="refresh-btn">Refresh</button>
+            <div class="text-sm muted">Uptime</div>
+            <div class="text-2xl font-bold positive" id="uptime">—</div>
+          </div>
+          <div class="text-right">
+            <div class="text-sm muted">Active Alerts</div>
+            <div class="text-xl font-semibold warn" id="alerts-count">—</div>
           </div>
         </div>
-        <canvas id="mainChart" style="height:260px;"></canvas>
+        <div class="mt-3 muted text-sm">Quick status summary</div>
       </div>
 
-      <!-- ALERTS / EVENTS -->
-      <div class="card p-3 mb-3">
-        <h6>Alerts</h6>
-        <ul id="alerts-list" class="list-unstyled mb-0">
-          <!-- JS will populate -->
-        </ul>
+      <div class="card p-4 rounded-lg">
+        <div class="text-sm muted">Avg API Latency</div>
+        <div class="text-2xl font-bold" id="latency">— ms</div>
         <div class="mt-3">
-          <button class="btn btn-sm btn-outline-danger" id="create-sample">Create sample event</button>
-          <small class="ms-2 muted-small">Use sample events to demo the AI suggestion.</small>
+          <canvas id="chart-cpu" height="100"></canvas>
         </div>
       </div>
 
-      <!-- Recent AI Suggestions -->
-      <div class="card p-3 mb-4">
-        <h6>Recent AI Suggestions</h6>
-        <div id="ai-recent">No suggestions yet.</div>
-      </div>
-
-    </div> <!-- END MAIN -->
-
-    <!-- RIGHT: AI PANEL (4) -->
-    <div class="col-lg-4">
-      <div class="card p-3 ai-panel">
-        <h5>AI Debug Assistant</h5>
-        <div class="mb-2 muted-small">Paste an event id from alerts or create a sample event.</div>
-        <input id="event-id" class="form-control mb-2" placeholder="paste eventId (eg. ev_xxx)"/>
-        <button id="ask-ai" class="btn btn-primary w-100 mb-2">Ask AI for Debug Suggestions</button>
-        <div id="ai-result" class="pt-2" style="min-height:80px;">—</div>
-      </div>
-
-      <div class="card p-3 mt-3">
-        <h6>Integrations</h6>
-        <p class="muted-small">Alerts → Slack / Email / PagerDuty (demo)</p>
-        <hr/>
-        <h6 class="small">Quick actions</h6>
-        <button class="btn btn-outline-secondary btn-sm w-100 mb-2" id="export-diag">Export diag bundle</button>
-        <button class="btn btn-outline-secondary btn-sm w-100" id="ack-all">Acknowledge all</button>
+      <div class="card p-4 rounded-lg">
+        <div class="text-sm muted">Error Rate</div>
+        <div class="text-2xl font-bold danger" id="error-rate">—</div>
+        <div class="mt-3 muted text-sm">Recent incidents</div>
+        <ul id="recent-incidents" class="mt-2 text-sm space-y-1"></ul>
       </div>
     </div>
 
-  </div>
-</div>
+    <!-- Main grid: left charts, right AI panel -->
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+      <div class="lg:col-span-2 space-y-4">
+        <div class="card p-4 rounded-lg">
+          <div class="flex items-center justify-between">
+            <div>
+              <h2 class="text-lg font-semibold">API Performance Trends</h2>
+              <div class="muted text-sm">Last few samples</div>
+            </div>
+            <div class="muted text-sm">Auto-updating demo</div>
+          </div>
+          <div class="mt-4">
+            <canvas id="chart-trend" height="120"></canvas>
+          </div>
+        </div>
 
-<!-- Fullscreen Modal for chart -->
-<div class="modal fade" id="chartModal" tabindex="-1">
-  <div class="modal-dialog modal-xl modal-fullscreen-sm-down">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h5 class="modal-title">Full-screen Chart</h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        <div class="card p-4 rounded-lg">
+          <h3 class="text-lg font-semibold">Events Table (recent)</h3>
+          <div class="mt-3">
+            <table class="w-full text-sm">
+              <thead class="text-left muted text-xs">
+                <tr><th>ID</th><th>Type</th><th>Message</th><th>Time</th></tr>
+              </thead>
+              <tbody id="events-table" class="divide-y divide-slate-700"></tbody>
+            </table>
+          </div>
+        </div>
       </div>
-      <div class="modal-body">
-        <canvas id="fullChart" style="height:70vh;"></canvas>
-      </div>
+
+      <aside class="space-y-4">
+        <div class="card p-4 rounded-lg">
+          <h3 class="text-lg font-semibold">AI Insights</h3>
+          <p class="muted text-sm">Suggestions generated by demo AI / local heuristic</p>
+          <div id="ai-suggestions" class="mt-3 space-y-3"></div>
+        </div>
+
+        <div class="card p-4 rounded-lg">
+          <h3 class="text-lg font-semibold">Ask AI (quick)</h3>
+          <textarea id="ai-input" rows="3" class="w-full p-2 bg-slate-900 rounded text-sm" placeholder="Paste event id or message..."></textarea>
+          <div class="mt-2 flex gap-2">
+            <button id="btn-ask" class="px-3 py-2 bg-emerald-600 rounded text-white">Ask AI</button>
+            <button id="btn-clear" class="px-3 py-2 border rounded text-sm muted">Clear</button>
+          </div>
+          <div id="ai-response" class="mt-3 text-sm muted"></div>
+        </div>
+      </aside>
     </div>
-  </div>
-</div>
 
-<!-- Bootstrap JS (CDN) -->
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+    <footer class="mt-6 muted text-sm">
+      Nexus Demo • For investor presentation only — data simulated.
+    </footer>
+  </div>
 
 <script>
-/* ---------- helper: fetch metrics ---------- */
-async function fetchMetrics() {
-  try {
-    const res = await fetch('/api/metrics');
-    if (!res.ok) throw new Error('metrics failed');
-    return await res.json();
-  } catch (e) {
-    return {ok:false, db:false, time: new Date().toISOString(), series: {cpu:[],mem:[]}, alerts: []};
-  }
-}
-
-/* ---------- initial rendering & Chart.js setup ---------- */
-let mainChart, fullChart;
-let sparkCpu, sparkMem, sparkDisk, sparkDb;
-
-function makeSpark(ctx, data, color='#3b82f6') {
-  return new Chart(ctx, {
-    type:'line',
-    data:{labels: data.map((_,i)=>i), datasets:[{data, borderWidth:1, pointRadius:0, tension:0.3, borderColor:color}]},
-    options:{responsive:true, plugins:{legend:{display:false}}, scales:{x:{display:false}, y:{display:false}}}
-  });
-}
-
-function makeMainChart(ctx, labels, cpuData, memData) {
-  return new Chart(ctx, {
-    type: 'line',
-    data: {
-      labels,
-      datasets: [
-        { label: 'CPU %', data: cpuData, borderColor: '#ff6b6b', backgroundColor:'rgba(255,107,107,0.05)', tension:0.3 },
-        { label: 'Memory %', data: memData, borderColor: '#3b82f6', backgroundColor:'rgba(59,130,246,0.05)', tension:0.3 }
-      ]
-    },
-    options: { maintainAspectRatio:false, interaction:{mode:'index'}, plugins:{legend:{position:'top'}} }
-  });
-}
-
-/* ---------- update UI with fetched metrics ---------- */
-async function refreshUI() {
-  const m = await fetchMetrics();
-  // top small stats
-  document.getElementById('stat-cpu').innerText = m.series?.cpu?.slice(-1)[0] ?? '—';
-  document.getElementById('stat-mem').innerText = m.series?.mem?.slice(-1)[0] ?? '—';
-  document.getElementById('stat-disk').innerText = m.disk_percent ?? '—';
-  document.getElementById('stat-dused').innerText = m.disk_used ?? '—';
-  document.getElementById('stat-active').innerText = m.active_sessions ?? '—';
-  document.getElementById('stat-latency').innerText = (m.latency_ms ?? '—') + 'ms';
-  document.getElementById('stat-db').innerText = m.db ? 'OK' : 'DOWN';
-  document.getElementById('stat-time').innerText = new Date(m.time).toLocaleString();
-
-  // alerts
-  const alist = document.getElementById('alerts-list');
-  alist.innerHTML = '';
-  (m.alerts || []).slice(0,8).forEach(a=>{
-    const li = document.createElement('li');
-    const badgeClass = a.level === 'Critical' ? 'badge-sev-critical' : (a.level==='Warning' ? 'badge-sev-warning' : 'badge-sev-info');
-    li.innerHTML = `<div class="d-flex justify-content-between align-items-start">
-      <div><span class="badge ${badgeClass} me-2">${a.level}</span> <strong>${a.title}</strong><div class="muted-small">${a.time}</div></div>
-      <div><button class="btn btn-sm btn-link" data-id="${a.id}" onclick="copyId(this)">Copy</button></div>
-    </div>`;
-    alist.appendChild(li);
-  });
-
-  // chart data update
-  const labels = (m.series?.labels) || [];
-  const cpu = (m.series?.cpu) || [];
-  const mem = (m.series?.mem) || [];
-
-  if (!mainChart) {
-    mainChart = makeMainChart(document.getElementById('mainChart'), labels, cpu, mem);
-  } else {
-    mainChart.data.labels = labels;
-    mainChart.data.datasets[0].data = cpu;
-    mainChart.data.datasets[1].data = mem;
-    mainChart.update();
+  // Helper: fetch JSON with error handling
+  async function jfetch(url, opts) {
+    try {
+      const res = await fetch(url, opts || {});
+      return await res.json();
+    } catch (e) {
+      console.warn("fetch failed", url, e);
+      return null;
+    }
   }
 
-  // sparks
-  if (!sparkCpu) sparkCpu = makeSpark(document.getElementById('spark-cpu'), cpu.slice(-10), '#ff6b6b');
-  else { sparkCpu.data.datasets[0].data = cpu.slice(-10); sparkCpu.update(); }
+  // Chart objects
+  let trendChart = null, cpuChart = null;
 
-  if (!sparkMem) sparkMem = makeSpark(document.getElementById('spark-mem'), mem.slice(-10), '#3b82f6');
-  else { sparkMem.data.datasets[0].data = mem.slice(-10); sparkMem.update(); }
+  function initCharts() {
+    const ctx = document.getElementById('chart-trend').getContext('2d');
+    trendChart = new Chart(ctx, {
+      type: 'line',
+      data: { labels: [], datasets: [{ label: 'CPU %', data: [], tension: 0.3, fill: true }] },
+      options: { plugins: { legend: { display: false } }, scales: { x: { display: false }, y: { beginAtZero: true } } }
+    });
 
-  if (!sparkDisk) sparkDisk = makeSpark(document.getElementById('spark-disk'), (m.series?.disk||[]).slice(-10), '#8b5cf6');
-  else { sparkDisk.data.datasets[0].data = (m.series?.disk||[]).slice(-10); sparkDisk.update(); }
+    const ctx2 = document.getElementById('chart-cpu').getContext('2d');
+    cpuChart = new Chart(ctx2, {
+      type: 'bar',
+      data: { labels: [], datasets: [{ label: 'Mem %', data: [] }] },
+      options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
+    });
+  }
 
-  if (!sparkDb) sparkDb = makeSpark(document.getElementById('spark-db'), (m.series?.db_ok? [1,1,1,1] : [0,0,0,0]), '#10b981');
-  else { sparkDb.update(); }
-}
+  // Update UI from /api/metrics
+  async function refreshMetrics() {
+    const m = await jfetch('/api/metrics');
+    if (!m || !m.ok) return;
+    // uptime & quick cards
+    document.getElementById('uptime').innerText = Math.round(99 + Math.random() * 0.99) + '%';
+    document.getElementById('latency').innerText = Math.round(100 + Math.random() * 200) + ' ms';
+    document.getElementById('alerts-count').innerText = Math.floor(Math.random() * 10);
 
-/* ---------- helper actions ---------- */
-function copyId(btn){
-  const id = btn.getAttribute('data-id');
-  navigator.clipboard?.writeText(id || '');
-  btn.innerText = 'Copied';
-  setTimeout(()=>btn.innerText='Copy',1200);
-}
+    // trend chart: use metrics if provided
+    const labels = (m.series && m.series.labels) ? m.series.labels.map(t => new Date(t*1000).toLocaleTimeString()) : Array.from({length:10}, (_,i)=>i);
+    const cpu = (m.series && m.series.cpu) ? m.series.cpu : Array.from({length:10}, ()=>Math.round(10+Math.random()*60));
+    const mem = (m.series && m.series.mem) ? m.series.mem : Array.from({length:10}, ()=>Math.round(20+Math.random()*70));
 
-document.getElementById('refresh-btn').addEventListener('click', () => refreshUI());
-document.getElementById('create-sample').addEventListener('click', async () => {
-  await fetch('/api/create_sample', {method:'POST'});
-  await refreshUI();
-});
-document.getElementById('ask-ai').addEventListener('click', async () => {
-  const eid = document.getElementById('event-id').value.trim();
-  if (!eid) { alert('paste event id or create sample'); return; }
-  const rBox = document.getElementById('ai-result');
-  rBox.innerHTML = '<div class="muted-small">Asking AI…</div>';
-  const resp = await fetch('/api/ai/suggest', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({event_id: eid})});
-  const data = await resp.json();
-  rBox.innerHTML = `<pre style="white-space:pre-wrap">${data.suggestion || data.error || 'No result'}</pre>`;
-  // append to recent
-  const recent = document.getElementById('ai-recent');
-  recent.innerHTML = `<div class="mb-2"><strong>${data.summary||'AI Suggestion'}</strong><div class="muted-small">${data.suggestion?.slice(0,200) || ''}</div></div>` + recent.innerHTML;
-});
+    if (trendChart) {
+      trendChart.data.labels = labels;
+      trendChart.data.datasets[0].data = cpu;
+      trendChart.update();
+    }
+    if (cpuChart) {
+      cpuChart.data.labels = labels;
+      cpuChart.data.datasets[0].data = mem;
+      cpuChart.update();
+    }
 
-/* fullscreen graph handler */
-document.getElementById('expand-graph').addEventListener('click', ()=>{
-  const modal = new bootstrap.Modal(document.getElementById('chartModal'));
-  modal.show();
-  setTimeout(()=> {
-    // copy mainChart data to fullChart
-    if (window.fullChart) window.fullChart.destroy();
-    const ctx = document.getElementById('fullChart').getContext('2d');
-    window.fullChart = new Chart(ctx, Object.assign({}, mainChart.config, { options: Object.assign({}, mainChart.options, { maintainAspectRatio:false }) }));
-  },250);
-});
+    // events demo: fetch recent events by calling /api/ingest? (we will also fetch events stored)
+    // We will try reading 'events' from the /api/create_sample result (create_sample persists).
+    const eventsTbl = document.getElementById('events-table');
+    eventsTbl.innerHTML = '';
+    try {
+      // Try reading seeded events by calling a backend read route; if not available, show synthetic
+      // We will try /api/metrics response to show db status
+      if (m.db) {
+        // Try to list recent events using a simple approach: call /api/create_sample (this returns event payload only)
+        // Instead we simulate a list using the seeded demo ids:
+        const demoIds = ['ev_demo_1','ev_demo_2','ev_demo_3','ev_demo_4','ev_demo_5'];
+        demoIds.forEach(id => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td class="py-2 text-xs">${id}</td><td class="py-2 text-xs">INFO</td><td class="py-2 text-xs muted">Demo event message for ${id}</td><td class="py-2 text-xs muted">now</td>`;
+          eventsTbl.appendChild(tr);
+        });
+      } else {
+        // Synthetic fallback rows
+        for (let i=0;i<5;i++) {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td class="py-2 text-xs">demo_${i}</td><td class="py-2 text-xs">WARN</td><td class="py-2 text-xs muted">No DB: showing synthetic</td><td class="py-2 text-xs muted">-</td>`;
+          eventsTbl.appendChild(tr);
+        }
+      }
+    } catch (e) {
+      console.warn(e);
+    }
+  }
 
-/* initial load */
-refreshUI();
-setInterval(refreshUI, 8000); // refresh every 8 seconds (demo)
+  // Fetch and display AI suggestions
+  async function refreshAISuggestions() {
+    const res = await jfetch('/api/ai/suggestions');
+    const panel = document.getElementById('ai-suggestions');
+    panel.innerHTML = '';
+    if (!res || !res.ok || !res.suggestions) {
+      panel.innerHTML = `<div class="muted text-sm">No suggestions yet. Create an event to generate one.</div>`;
+      return;
+    }
+    res.suggestions.forEach(s => {
+      const d = document.createElement('div');
+      d.className = 'p-3 rounded border border-slate-700';
+      d.innerHTML = `<div class="font-semibold">${escapeHtml(s.title)}</div><div class="muted text-xs mt-1">${escapeHtml(s.body)}</div><div class="muted text-xs mt-1">${escapeHtml(s.created_at)}</div>`;
+      panel.appendChild(d);
+    });
+  }
+
+  function escapeHtml(str){ return (''+str).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+  // Wire UI buttons
+  async function setupUI() {
+    document.getElementById('btn-create').addEventListener('click', async () => {
+      const res = await jfetch('/api/ingest', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({event_type: 'ERROR', message: 'Manual test event from Pankaj'})});
+      if (res && res.ok) {
+        alert('Event created: ' + res.event_id);
+        await refreshAISuggestions();
+        await refreshMetrics();
+      } else {
+        alert('Failed to create event (see console).');
+      }
+    });
+
+    document.getElementById('btn-refresh').addEventListener('click', async () => {
+      await refreshMetrics();
+      await refreshAISuggestions();
+    });
+
+    document.getElementById('btn-ask').addEventListener('click', async () => {
+      const txt = document.getElementById('ai-input').value || 'ev_demo_1';
+      const payload = { event_id: txt };
+      const res = await jfetch('/api/ai/suggest', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
+      const out = document.getElementById('ai-response');
+      if (res && res.ok) {
+        out.innerHTML = `<div class="font-semibold">[${res.provider || 'demo'}]</div><div class="muted text-sm">${escapeHtml(res.suggestion || res.analysis || '')}</div>`;
+        await refreshAISuggestions();
+      } else {
+        out.innerText = 'AI request failed';
+      }
+    });
+
+    document.getElementById('btn-clear').addEventListener('click', () => {
+      document.getElementById('ai-input').value = '';
+      document.getElementById('ai-response').innerHTML = '';
+    });
+  }
+
+  // Init page
+  (function () {
+    initCharts();
+    setupUI();
+    refreshMetrics();
+    refreshAISuggestions();
+    // auto refresh
+    setInterval(async () => { await refreshMetrics(); await refreshAISuggestions(); }, 8000);
+  })();
 </script>
 </body>
 </html>

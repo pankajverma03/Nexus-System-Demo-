@@ -41,10 +41,26 @@ def init_db_engine():
         engine = create_engine("sqlite:///:memory:", echo=False, future=True)
         SessionLocal = _sessionmaker(bind=engine)
         app.logger.info("Using fallback in-memory SQLite engine (demo mode)")
-    except Exception as e:
-        app.logger.error(f"Failed to create fallback DB engine: {e}")
-        engine = None
-        SessionLocal = None
+except Exception as e:
+    app.logger.error(f"Failed to create fallback DB engine: {e}")
+    engine = None
+    SessionLocal = None
+
+
+# Delay heavy import of ai_router until runtime to avoid startup crash
+analyze_event_ai = None
+try:
+    from ai_router import analyze_event_ai as _analyze
+    analyze_event_ai = _analyze
+    app.logger.info("ai_router imported successfully")
+except Exception as e:
+    analyze_event_ai = None
+    app.logger.warning(f"ai_router import failed at startup: {e}")
+
+
+# --- Dashboard (simple demo UI, templates/dashboard.html) ---
+@app.route('/')
+def dashboard():
 
 # Delay heavy import of ai_router until runtime to avoid startup crash
 analyze_event_ai = None

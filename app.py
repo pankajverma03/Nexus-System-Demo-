@@ -4,8 +4,8 @@ from datetime import datetime
 from sqlalchemy import text
 import os
 import logging
+import traceback
 
-# create app FIRST (must exist before any route definitions)
 app = Flask(__name__)
 app.logger.setLevel(logging.INFO)
 
@@ -23,8 +23,8 @@ def init_db_engine():
     if engine is not None and SessionLocal is not None:
         return
 
+    # Try production engine import
     try:
-        # production path (if present)
         from db import engine as imported_engine
         from sqlalchemy.orm import sessionmaker as _sessionmaker
         engine = imported_engine
@@ -34,48 +34,93 @@ def init_db_engine():
     except Exception as e:
         app.logger.warning(f"db import failed at startup: {e}")
 
-    # fallback: in-memory SQLite (demo-only, no persistence)
+    # Fallback: in-memory SQLite (demo-only)
     try:
         from sqlalchemy import create_engine
         from sqlalchemy.orm import sessionmaker as _sessionmaker
         engine = create_engine("sqlite:///:memory:", echo=False, future=True)
         SessionLocal = _sessionmaker(bind=engine)
         app.logger.info("Using fallback in-memory SQLite engine (demo mode)")
-except Exception as e:
-    app.logger.error(f"Failed to create fallback DB engine: {e}")
-    engine = None
-    SessionLocal = None
+    except Exception as e:
+        app.logger.error(f"Failed to create fallback DB engine: {e}")
+        engine = None
+        SessionLocal = None
 
+def seed_demo_events():
+    """
+    Seed a few demo events and suggestions when using the in-memory fallback.
+    Safe to call multiple times.
+    """
+    try:
+        if SessionLocal is None:
+            app.logger.warning("SessionLocal is None — skipping seed_demo_events")
+            return
 
-# Delay heavy import of ai_router until runtime to avoid startup crash
+        with SessionLocal() as db:
+            # Create simple tables if they don't exist (raw SQL for portability)
+            db.execute(text(
+                "CREATE TABLE IF NOT EXISTS events ("
+                "id TEXT PRIMARY KEY, event_type TEXT, message TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)"
+            ))
+            db.execute(text(
+                "CREATE TABLE IF NOT EXISTS ai_suggestions ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT, title TEXT, body TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)"
+            ))
+            # Check if already seeded (avoid duplicates)
+            row = db.execute(text("SELECT COUNT(1) as c FROM events")).fetchone()
+            count = row[0] if row else 0
+            if count > 0:
+                app.logger.info("Demo DB already seeded (events exist).")
+                return
+
+            demo_rows = [
+                ("ev_demo_1", "ERROR", "DB connection timeout on /api/metrics"),
+                ("ev_demo_2", "WARN", "Memory usage spike detected (85%)"),
+                ("ev_demo_3", "INFO", "Service restart completed: svc-auth"),
+                ("ev_demo_4", "ERROR", "Failed write to disk /var/log"),
+                ("ev_demo_5", "INFO", "Synthetic event for demo: TraceID demo-1234")
+            ]
+            for _id, et, msg in demo_rows:
+                db.execute(text("INSERT INTO events (id, event_type, message) VALUES (:id, :et, :msg)"),
+                           {"id": _id, "et": et, "msg": msg})
+            # add a simple ai suggestion row for one event
+            db.execute(text("INSERT INTO ai_suggestions (event_id, title, body) VALUES (:eid, :t, :b)"),
+                       {"eid": "ev_demo_1", "t": "Investigate DB timeout", "b": "Check DB connections; restart DB pool if necessary."})
+            db.commit()
+            app.logger.info("Seeded demo events and ai_suggestions (5 events + 1 suggestion)")
+    except Exception as e:
+        app.logger.exception(f"seed_demo_events failed: {e}")
+
+# Lazy AI loader: keep analyze_event_ai None until first use
 analyze_event_ai = None
-try:
-    from ai_router import analyze_event_ai as _analyze
-    analyze_event_ai = _analyze
-    app.logger.info("ai_router imported successfully")
-except Exception as e:
-    analyze_event_ai = None
-    app.logger.warning(f"ai_router import failed at startup: {e}")
-
-
-# --- Dashboard (simple demo UI, templates/dashboard.html) ---
-@app.route('/')
-def dashboard():
-
-# Delay heavy import of ai_router until runtime to avoid startup crash
-analyze_event_ai = None
-try:
-    from ai_router import analyze_event_ai as _analyze
-    analyze_event_ai = _analyze
-    app.logger.info("ai_router imported successfully")
-except Exception as e:
-    analyze_event_ai = None
-    app.logger.warning(f"ai_router import failed at startup: {e}")
+def ensure_ai_router_loaded():
+    """
+    Lazy import ai_router and set analyze_event_ai callable.
+    Returns callable or None.
+    """
+    global analyze_event_ai
+    if analyze_event_ai is not None:
+        return analyze_event_ai
+    try:
+        from ai_router import analyze_event_ai as _analyze
+        analyze_event_ai = _analyze
+        app.logger.info("ai_router imported successfully at runtime")
+    except Exception as e:
+        analyze_event_ai = None
+        app.logger.warning(f"ai_router import failed at runtime: {e}")
+    return analyze_event_ai
 
 # --- Dashboard (simple demo UI, templates/dashboard.html) ---
 @app.route('/')
 def dashboard():
     init_db_engine()
+    # seed demo only for fallback sqlite or when env DEMO_SEED is true (default True for demo)
+    try:
+        demo_seed_flag = os.environ.get("DEMO_SEED", "true").lower() in ("1", "true", "yes")
+        if engine is not None and str(getattr(engine, "url", "")).startswith("sqlite") and demo_seed_flag:
+            seed_demo_events()
+    except Exception:
+        app.logger.debug("seed_demo check failed: " + traceback.format_exc())
 
     snapshot = {
         "time": datetime.utcnow().isoformat(),
@@ -87,7 +132,6 @@ def dashboard():
     try:
         if SessionLocal:
             with SessionLocal() as db:
-                # SQLAlchemy prefers text() for raw SQL
                 _ = db.execute(text("SELECT 1")).fetchone()
                 snapshot["db"] = True
                 snapshot["ok"] = True
@@ -133,17 +177,54 @@ def create_sample():
     }
     try:
         if SessionLocal:
-            # local import to avoid startup-time circular issues
-            from models import Event
             with SessionLocal() as db:
-                # adjust column name used in your models: meta_info or metadata
-                ev = Event(id=sample["id"], payload=sample["payload"], meta_info=sample["meta_info"])
-                db.add(ev)
+                # best-effort raw SQL insert to be ORM-agnostic
+                db.execute(text("CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, event_type TEXT, message TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)"))
+                db.execute(text("INSERT OR REPLACE INTO events (id, event_type, message) VALUES (:id, :et, :msg)"),
+                           {"id": sample["id"], "et": "ERROR", "msg": str(sample["payload"] )})
                 db.commit()
     except Exception as e:
         app.logger.warning(f"Create-sample persistence failed: {e}")
 
     return jsonify(ok=True, event=sample), 200
+
+# --- Minimal ingest endpoint to populate the demo dashboard ---
+@app.route("/api/ingest", methods=["POST"])
+def api_ingest():
+    """
+    Minimal ingest endpoint for demo:
+    - Inserts event into events table
+    - Returns a simulated AI suggestion (so UI shows Recent AI Suggestions)
+    """
+    init_db_engine()
+    payload = request.get_json(silent=True) or {}
+    event_type = payload.get("event_type", "INFO")
+    message = payload.get("message", "Synthetic ingest event from demo UI")
+    event_id = payload.get("id") or f"ev_manual_{int(datetime.utcnow().timestamp())}"
+
+    try:
+        if SessionLocal is None:
+            return jsonify({"ok": False, "error": "DB not available"}), 500
+
+        with SessionLocal() as db:
+            db.execute(text("CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, event_type TEXT, message TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)"))
+            db.execute(text("INSERT OR REPLACE INTO events (id, event_type, message) VALUES (:id, :et, :msg)"),
+                       {"id": event_id, "et": event_type, "msg": message})
+            db.commit()
+
+            # create a simple AI suggestion row (simulated)
+            db.execute(text("CREATE TABLE IF NOT EXISTS ai_suggestions (id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT, title TEXT, body TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)"))
+            sim_title = f"{event_type} - Demo Suggestion"
+            sim_body = f"Simulated: check logs for recent {event_type} events. TraceID: demo-{int(datetime.utcnow().timestamp())}"
+            db.execute(text("INSERT INTO ai_suggestions (event_id, title, body) VALUES (:eid, :t, :b)"),
+                       {"eid": event_id, "t": sim_title, "b": sim_body})
+            db.commit()
+
+        suggestion = {"suggestion": sim_body, "action": "Check application logs and restart service if persistent."}
+        return jsonify({"ok": True, "event_id": event_id, "suggestion": suggestion}), 201
+    except Exception as e:
+        app.logger.exception(f"api_ingest failed: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 # --- route: metrics (GET) ---
 @app.route('/api/metrics', methods=['GET'])
@@ -178,23 +259,27 @@ def api_ai_suggest():
     # Try to fetch event from DB (best-effort)
     try:
         if SessionLocal:
-            from models import Event
             with SessionLocal() as db:
-                ev = db.query(Event).filter_by(id=event_id).first()
-                if ev:
-                    event_payload = getattr(ev, "payload", None)
-                    event_meta = getattr(ev, "meta_info", None)
+                # Try fetch event row
+                row = db.execute(text("SELECT message FROM events WHERE id = :id"), {"id": event_id}).fetchone()
+                if row:
+                    event_payload = row[0]
     except Exception as e:
         app.logger.warning(f"Failed to read event from DB: {e}")
 
-    # Use ai_router if available; else fallback to simple heuristic
-    if analyze_event_ai:
+    # Try lazy load ai_router
+    ai_callable = ensure_ai_router_loaded()
+    if ai_callable:
         try:
-            res = analyze_event_ai(event_id=event_id, event_payload=event_payload, event_meta=event_meta)
+            res = ai_callable(event_id=event_id, event_payload=event_payload, event_meta=event_meta)
+            # Expect res to be dict-like; if string, wrap it
+            if isinstance(res, str):
+                res = {"analysis": res, "suggestion": res, "provider": "ai_router"}
         except Exception as e:
             app.logger.warning(f"analyze_event_ai failed at runtime: {e}")
             res = {"analysis": "ai runtime error", "suggestion": "AI unavailable", "provider": "none"}
     else:
+        # Local heuristic fallback
         summary = f"Event {event_id}: local-heuristic analysis"
         suggestion = "Check network connectivity and restart the affected node."
         res = {"analysis": summary, "suggestion": suggestion, "provider": "local-heuristic"}
@@ -202,13 +287,11 @@ def api_ai_suggest():
     # optional persist suggestion (best-effort)
     try:
         if SessionLocal:
-            from models import AISuggestion
             with SessionLocal() as db:
-                sug = AISuggestion(event_id=event_id, analysis=res.get("analysis"), suggestion=res.get("suggestion"), provider=res.get("provider"))
-                db.add(sug)
+                db.execute(text("CREATE TABLE IF NOT EXISTS ai_suggestions (id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT, title TEXT, body TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)"))
+                db.execute(text("INSERT INTO ai_suggestions (event_id, title, body) VALUES (:eid, :t, :b)"),
+                           {"eid": event_id, "t": f"{res.get('provider')} suggestion", "b": res.get("suggestion")})
                 db.commit()
-                db.refresh(sug)
-                res["suggestion_id"] = sug.id
     except Exception as e:
         app.logger.warning(f"Failed to persist AISuggestion: {e}")
 
@@ -217,4 +300,11 @@ def api_ai_suggest():
 # standard run for local debug (ignored by gunicorn)
 if __name__ == '__main__':
     init_db_engine()
+    # seed immediately for local dev if configured
+    try:
+        if engine is not None and str(getattr(engine, "url", "")).startswith("sqlite"):
+            seed_demo_events()
+    except Exception:
+        app.logger.debug("initial seed attempt failed: " + traceback.format_exc())
+
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)), debug=True)

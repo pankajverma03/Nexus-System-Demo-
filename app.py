@@ -226,6 +226,36 @@ def api_ingest():
         app.logger.exception(f"api_ingest failed: {e}")
         return jsonify({"ok": False, "error": str(e)}), 500
 
+# -------------------------
+# Add this GET endpoint to expose stored AI suggestions to the frontend
+# -------------------------
+@app.route("/api/ai/suggestions", methods=["GET"])
+def api_ai_suggestions():
+    """
+    Return recent AI suggestions (best-effort).
+    """
+    init_db_engine()
+    try:
+        if SessionLocal is None:
+            return jsonify(ok=False, error="DB not available"), 500
+
+        with SessionLocal() as db:
+            db.execute(text("CREATE TABLE IF NOT EXISTS ai_suggestions (id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT, title TEXT, body TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)"))
+            rows = db.execute(text("SELECT id, event_id, title, body, created_at FROM ai_suggestions ORDER BY created_at DESC LIMIT 20")).fetchall()
+            suggestions = []
+            for r in rows:
+                suggestions.append({
+                    "id": r[0],
+                    "event_id": r[1],
+                    "title": r[2],
+                    "body": r[3],
+                    "created_at": str(r[4])
+                })
+        return jsonify(ok=True, suggestions=suggestions), 200
+    except Exception as e:
+        app.logger.exception(f"api_ai_suggestions failed: {e}")
+        return jsonify(ok=False, error=str(e)), 500
+
 # --- route: metrics (GET) ---
 @app.route('/api/metrics', methods=['GET'])
 def api_metrics():

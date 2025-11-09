@@ -360,6 +360,44 @@ def api_ai_suggest():
         app.logger.warning(f"Failed to persist AISuggestion: {e}")
 
     return jsonify(ok=True, **res), 200
+    # ----------------- TEMP: DB migration helper (run once) -----------------
+@app.route('/admin/fix_ai_table', methods=['POST', 'GET'])
+def admin_fix_ai_table():
+    """
+    TEMP route - run once to add missing columns to ai_suggestions in Postgres.
+    Protect with MIGRATE_SECRET env var. Remove this route after success.
+    """
+    secret = os.environ.get("MIGRATE_SECRET", "")
+    q = request.args.get("secret") or request.form.get("secret") or ""
+    if not secret or q != secret:
+        return jsonify(ok=False, error="missing/invalid secret"), 403
+
+    init_db_engine()
+    if SessionLocal is None:
+        return jsonify(ok=False, error="DB not available"), 500
+
+    statements = [
+        # add title/body/created_at if missing
+        "ALTER TABLE ai_suggestions ADD COLUMN IF NOT EXISTS title TEXT;",
+        "ALTER TABLE ai_suggestions ADD COLUMN IF NOT EXISTS body TEXT;",
+        "ALTER TABLE ai_suggestions ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;",
+        # ensure id exists (if created earlier differently), try to avoid breaking existing PK
+        # no-op if column already exists
+    ]
+    results = []
+    try:
+        with SessionLocal() as db:
+            for s in statements:
+                try:
+                    db.execute(text(s))
+                    results.append({"stmt": s, "ok": True})
+                except Exception as e:
+                    results.append({"stmt": s, "ok": False, "error": str(e)})
+            db.commit()
+        return jsonify(ok=True, results=results), 200
+    except Exception as e:
+        return jsonify(ok=False, error=str(e)), 500
+# -----------------------------------------------------------------------
 
 # standard run for local debug (ignored by gunicorn)
 if __name__ == '__main__':

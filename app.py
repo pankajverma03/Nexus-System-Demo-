@@ -2,6 +2,7 @@
 from flask import Flask, render_template, request, jsonify
 from datetime import datetime
 from sqlalchemy import text
+from sqlalchemy import text as _text
 import os
 import logging
 import traceback
@@ -46,6 +47,46 @@ def init_db_engine():
         engine = None
         SessionLocal = None
 
+# --- helper: create demo tables in a dialect-aware way ---
+def ensure_demo_tables(db):
+    """
+    Create 'events' and 'ai_suggestions' tables using SQL that matches the DB dialect.
+    Call with an open SessionLocal() context: `with SessionLocal() as db: ensure_demo_tables(db)`
+    """
+    try:
+        is_postgres = False
+        try:
+            is_postgres = getattr(engine, "dialect").name in ("postgresql", "postgres")
+        except Exception:
+            # fallback: inspect engine.url string
+            try:
+                is_postgres = str(getattr(engine, "url", "")).startswith("postgres")
+            except Exception:
+                is_postgres = False
+
+        if is_postgres:
+            # PostgreSQL-friendly DDL
+            db.execute(_text(
+                "CREATE TABLE IF NOT EXISTS events ("
+                "id TEXT PRIMARY KEY, event_type TEXT, message TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+            ))
+            db.execute(_text(
+                "CREATE TABLE IF NOT EXISTS ai_suggestions ("
+                "id SERIAL PRIMARY KEY, event_id TEXT, title TEXT, body TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+            ))
+        else:
+            # SQLite / generic fallback
+            db.execute(_text(
+                "CREATE TABLE IF NOT EXISTS events ("
+                "id TEXT PRIMARY KEY, event_type TEXT, message TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)"
+            ))
+            db.execute(_text(
+                "CREATE TABLE IF NOT EXISTS ai_suggestions ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT, title TEXT, body TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)"
+            ))
+    except Exception as e:
+        app.logger.exception(f"ensure_demo_tables failed: {e}")
+
 def seed_demo_events():
     """
     Seed a few demo events and suggestions when using the in-memory fallback.
@@ -57,15 +98,9 @@ def seed_demo_events():
             return
 
         with SessionLocal() as db:
-            # Create simple tables if they don't exist (raw SQL for portability)
-            db.execute(text(
-                "CREATE TABLE IF NOT EXISTS events ("
-                "id TEXT PRIMARY KEY, event_type TEXT, message TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)"
-            ))
-            db.execute(text(
-                "CREATE TABLE IF NOT EXISTS ai_suggestions ("
-                "id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT, title TEXT, body TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)"
-            ))
+            # dialect-aware table creation
+            ensure_demo_tables(db)
+
             # Check if already seeded (avoid duplicates)
             row = db.execute(text("SELECT COUNT(1) as c FROM events")).fetchone()
             count = row[0] if row else 0
@@ -178,8 +213,8 @@ def create_sample():
     try:
         if SessionLocal:
             with SessionLocal() as db:
-                # best-effort raw SQL insert to be ORM-agnostic
-                db.execute(text("CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, event_type TEXT, message TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)"))
+                # ensure tables exist and then insert
+                ensure_demo_tables(db)
                 db.execute(text("INSERT OR REPLACE INTO events (id, event_type, message) VALUES (:id, :et, :msg)"),
                            {"id": sample["id"], "et": "ERROR", "msg": str(sample["payload"] )})
                 db.commit()
@@ -207,13 +242,12 @@ def api_ingest():
             return jsonify({"ok": False, "error": "DB not available"}), 500
 
         with SessionLocal() as db:
-            db.execute(text("CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, event_type TEXT, message TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)"))
+            ensure_demo_tables(db)
             db.execute(text("INSERT OR REPLACE INTO events (id, event_type, message) VALUES (:id, :et, :msg)"),
                        {"id": event_id, "et": event_type, "msg": message})
             db.commit()
 
             # create a simple AI suggestion row (simulated)
-            db.execute(text("CREATE TABLE IF NOT EXISTS ai_suggestions (id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT, title TEXT, body TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)"))
             sim_title = f"{event_type} - Demo Suggestion"
             sim_body = f"Simulated: check logs for recent {event_type} events. TraceID: demo-{int(datetime.utcnow().timestamp())}"
             db.execute(text("INSERT INTO ai_suggestions (event_id, title, body) VALUES (:eid, :t, :b)"),
@@ -240,7 +274,7 @@ def api_ai_suggestions():
             return jsonify(ok=False, error="DB not available"), 500
 
         with SessionLocal() as db:
-            db.execute(text("CREATE TABLE IF NOT EXISTS ai_suggestions (id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT, title TEXT, body TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)"))
+            ensure_demo_tables(db)
             rows = db.execute(text("SELECT id, event_id, title, body, created_at FROM ai_suggestions ORDER BY created_at DESC LIMIT 20")).fetchall()
             suggestions = []
             for r in rows:
@@ -318,7 +352,7 @@ def api_ai_suggest():
     try:
         if SessionLocal:
             with SessionLocal() as db:
-                db.execute(text("CREATE TABLE IF NOT EXISTS ai_suggestions (id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT, title TEXT, body TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)"))
+                ensure_demo_tables(db)
                 db.execute(text("INSERT INTO ai_suggestions (event_id, title, body) VALUES (:eid, :t, :b)"),
                            {"eid": event_id, "t": f"{res.get('provider')} suggestion", "b": res.get("suggestion")})
                 db.commit()

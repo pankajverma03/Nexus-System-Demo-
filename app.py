@@ -6,6 +6,8 @@ from sqlalchemy import text as _text
 import os
 import logging
 import traceback
+import time
+import random
 
 app = Flask(__name__)
 app.logger.setLevel(logging.INFO)
@@ -87,6 +89,41 @@ def ensure_demo_tables(db):
     except Exception as e:
         app.logger.exception(f"ensure_demo_tables failed: {e}")
 
+# --- helper: insert AI suggestion in a dialect-resilient way ---
+def insert_ai_suggestion(db, event_id, title, body):
+    """
+    Try to insert into ai_suggestions. Many legacy DBs may have 'id' without default.
+    Preferred: attempt to INSERT without id (let DB default). If that fails due to NOT NULL,
+    fallback to inserting a numeric id generated here (timestamp-based integer).
+    """
+    # prepare parameters
+    params = {"eid": event_id, "t": title, "b": body}
+    is_postgres = False
+    try:
+        is_postgres = getattr(engine, "dialect").name in ("postgresql", "postgres")
+    except Exception:
+        try:
+            is_postgres = str(getattr(engine, "url", "")).startswith("postgres")
+        except Exception:
+            is_postgres = False
+
+    try:
+        # Try normal insert (let DB decide id default)
+        db.execute(text("INSERT INTO ai_suggestions (event_id, title, body) VALUES (:eid, :t, :b)"), params)
+        return True, None
+    except Exception as first_exc:
+        # Log first failure and attempt fallback with generated numeric id
+        app.logger.warning(f"ai_suggestions insert (no-id) failed, trying fallback id: {first_exc}")
+        try:
+            # generate numeric id (fits integer SERIAL / INTEGER PK)
+            suggestion_id_int = int(time.time() * 1000)  # millisecond-based integer
+            fallback_params = {"id": suggestion_id_int, "eid": event_id, "t": title, "b": body}
+            db.execute(text("INSERT INTO ai_suggestions (id, event_id, title, body) VALUES (:id, :eid, :t, :b)"), fallback_params)
+            return True, None
+        except Exception as second_exc:
+            app.logger.exception(f"ai_suggestions fallback insert failed: {second_exc}")
+            return False, str(second_exc)
+
 def seed_demo_events():
     """
     Seed a few demo events and suggestions when using the in-memory fallback.
@@ -118,9 +155,10 @@ def seed_demo_events():
             for _id, et, msg in demo_rows:
                 db.execute(text("INSERT INTO events (id, event_type, message) VALUES (:id, :et, :msg)"),
                            {"id": _id, "et": et, "msg": msg})
-            # add a simple ai suggestion row for one event
-            db.execute(text("INSERT INTO ai_suggestions (event_id, title, body) VALUES (:eid, :t, :b)"),
-                       {"eid": "ev_demo_1", "t": "Investigate DB timeout", "b": "Check DB connections; restart DB pool if necessary."})
+            # add a simple ai suggestion row for one event - use helper
+            ok, err = insert_ai_suggestion(db, "ev_demo_1", "Investigate DB timeout", "Check DB connections; restart DB pool if necessary.")
+            if not ok:
+                app.logger.warning(f"seed_demo_events: failed to insert demo suggestion: {err}")
             db.commit()
             app.logger.info("Seeded demo events and ai_suggestions (5 events + 1 suggestion)")
     except Exception as e:
@@ -204,7 +242,6 @@ def create_sample():
     but always return the sample JSON to the client (non-blocking).
     """
     init_db_engine()
-    import random, time
     sample = {
         "id": f"ev_demo_{int(time.time())}_{random.randint(100,999)}",
         "payload": {"message": "simulated error: connection reset", "code": 502},
@@ -250,8 +287,9 @@ def api_ingest():
             # create a simple AI suggestion row (simulated)
             sim_title = f"{event_type} - Demo Suggestion"
             sim_body = f"Simulated: check logs for recent {event_type} events. TraceID: demo-{int(datetime.utcnow().timestamp())}"
-            db.execute(text("INSERT INTO ai_suggestions (event_id, title, body) VALUES (:eid, :t, :b)"),
-                       {"eid": event_id, "t": sim_title, "b": sim_body})
+            ok, err = insert_ai_suggestion(db, event_id, sim_title, sim_body)
+            if not ok:
+                app.logger.warning(f"api_ingest: failed to persist suggestion: {err}")
             db.commit()
 
         suggestion = {"suggestion": sim_body, "action": "Check application logs and restart service if persistent."}
@@ -293,7 +331,6 @@ def api_ai_suggestions():
 # --- route: metrics (GET) ---
 @app.route('/api/metrics', methods=['GET'])
 def api_metrics():
-    import random, time
     now = int(time.time())
     labels = []
     cpu = []
@@ -353,14 +390,16 @@ def api_ai_suggest():
         if SessionLocal:
             with SessionLocal() as db:
                 ensure_demo_tables(db)
-                db.execute(text("INSERT INTO ai_suggestions (event_id, title, body) VALUES (:eid, :t, :b)"),
-                           {"eid": event_id, "t": f"{res.get('provider')} suggestion", "b": res.get("suggestion")})
+                ok, err = insert_ai_suggestion(db, event_id, f"{res.get('provider')} suggestion", res.get("suggestion"))
+                if not ok:
+                    app.logger.warning(f"api_ai_suggest: failed to persist suggestion: {err}")
                 db.commit()
     except Exception as e:
         app.logger.warning(f"Failed to persist AISuggestion: {e}")
 
     return jsonify(ok=True, **res), 200
-    # ----------------- TEMP: DB migration helper (run once) -----------------
+
+# ----------------- TEMP: DB migration helper (run once) -----------------
 @app.route('/admin/fix_ai_table', methods=['POST', 'GET'])
 def admin_fix_ai_table():
     """

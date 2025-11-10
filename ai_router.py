@@ -1,98 +1,176 @@
 # ai_router.py
 """
-Runtime AI router for Nexus System.
-Provides analyze_event_ai(event_id, event_payload, event_meta) -> dict
-Returns: {"analysis": str, "suggestion": str, "provider": "openai"|"local-heuristic"}
+Lightweight AI router for Nexus demo.
+
+Usage:
+  from ai_router import analyze_event_ai
+  res = analyze_event_ai(event_id=..., event_payload=..., event_meta=...)
+
+Returns a dict: {"analysis": str, "suggestion": str, "provider": "openai"|"local-heuristic"}
 """
+
 import os
-import json
 import time
 import traceback
-import openai
 
-# Models to try in order (adjust if your OpenAI access differs)
-MODEL_PREFER = ["gpt-5", "gpt-4o-mini", "gpt-4o", "gpt-4"]
+# Optional: use OpenAI if API key present
+USE_OPENAI = bool(os.environ.get("OPENAI_API_KEY"))
 
-# load API key from env
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-if OPENAI_API_KEY:
-    openai.api_key = OPENAI_API_KEY
+# Config via env:
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")   # override as needed
+OPENAI_TIMEOUT = int(os.environ.get("OPENAI_TIMEOUT", "15"))  # seconds per attempt
+OPENAI_MAX_RETRIES = int(os.environ.get("OPENAI_MAX_RETRIES", "2"))
 
-def local_heuristic(event_payload, event_meta):
-    """Simple, fast fallback so UI always gets something useful."""
-    hints = []
-    text = json.dumps(event_payload or {}, default=str).lower()
-    if "timeout" in text or "timed out" in text:
-        hints.append("Check external API timeouts and retry/backoff logic.")
-    if "database" in text or "db" in text or "connection" in text:
-        hints.append("Investigate DB connections: pool size, long-running queries or locks.")
-    if "cpu" in text or "memory" in text or "out of memory" in text or "oom" in text:
-        hints.append("Check recent CPU/Memory graphs, look for spikes and recent deploys.")
-    if "selector" in text or "meta" in text or "ui" in text:
-        hints.append("UI selector changed — update selector map and redeploy frontend.")
-    if not hints:
-        hints.append("No clear pattern from payload. Pull full logs and correlationId for RCA.")
-    return {
-        "analysis": "Local heuristic used due to missing AI response.",
-        "suggestion": " ; ".join(hints),
-        "provider": "local-heuristic"
-    }
+# Lazy import to avoid failing when openai not installed
+_openai = None
+if USE_OPENAI:
+    try:
+        import openai as _openai_mod
+        _openai = _openai_mod
+        _openai.api_key = OPENAI_API_KEY
+    except Exception:
+        _openai = None
 
-def call_openai(prompt: str, timeout_seconds: int = 8, max_retries: int = 2):
-    """Call OpenAI ChatCompletion with safe timeouts/retries. Returns (ok, result_dict_or_error)."""
-    if not OPENAI_API_KEY:
-        return False, {"error": "OPENAI_API_KEY not configured"}
-
-    last_exc = None
-    for model in MODEL_PREFER:
-        for attempt in range(max_retries):
-            try:
-                resp = openai.ChatCompletion.create(
-                    model=model,
-                    messages=[{"role": "system", "content": "You are a pragmatic site reliability engineer."},
-                              {"role": "user", "content": prompt}],
-                    max_tokens=500,
-                    temperature=0.2,
-                    n=1,
-                    timeout=timeout_seconds
-                )
-                text = resp["choices"][0]["message"]["content"].strip()
-                # Basic split: if LLM provided structured output we can't rely on it — just return text.
-                return True, {"analysis": text, "suggestion": text, "provider": model}
-            except Exception as e:
-                last_exc = e
-                # brief backoff
-                time.sleep(0.7 * (attempt + 1))
-                # try next attempt/model
-        # next model
-    return False, {"error": str(last_exc) if last_exc else "OpenAI call failed"}
-
-def analyze_event_ai(event_id: str, event_payload, event_meta=None):
+def _build_prompt(event_id: str, event_payload, event_meta) -> str:
     """
-    Public function used by app.py.
-    Attempts OpenAI first, falls back to local heuristic.
+    Build a compact prompt for the model.
+    Keep it short to avoid large tokens and keep response consistent.
+    """
+    lines = []
+    lines.append(f"You are an SRE assistant. Provide a short analysis and 3 practical suggestions.")
+    lines.append(f"Event ID: {event_id}")
+    if event_meta:
+        # event_meta may be dict-like
+        try:
+            lines.append(f"Meta: {str(event_meta)}")
+        except Exception:
+            pass
+    if event_payload:
+        # payload may be a string or dict
+        try:
+            if isinstance(event_payload, (dict, list)):
+                lines.append("Payload (json): " + str(event_payload))
+            else:
+                lines.append("Payload: " + str(event_payload))
+        except Exception:
+            pass
+    lines.append("")
+    lines.append("Respond in JSON with keys: analysis, suggestion (short). Use first-person technical tone.")
+    prompt = "\n".join(lines)
+    return prompt
+
+def _call_openai(prompt: str) -> dict:
+    """
+    Call OpenAI API. Returns {'analysis':..., 'suggestion': ...}
+    Uses simple retry/backoff on transient errors.
+    """
+    if _openai is None:
+        raise RuntimeError("openai client not available")
+
+    attempt = 0
+    backoff = 1.0
+    last_err = None
+
+    while attempt <= OPENAI_MAX_RETRIES:
+        try:
+            # Use a single-turn completion-style request (chat/completions)
+            # Try to be conservative on tokens and latency.
+            resp = _openai.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=[
+                    {"role": "system", "content": "You are a concise, practical SRE assistant."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=300,
+                temperature=0.2,
+                request_timeout=OPENAI_TIMEOUT
+            )
+            # The structure may depend on SDK version; attempt to parse generically
+            text = ""
+            try:
+                # new style: resp.choices[0].message.content
+                text = resp.choices[0].message.content.strip()
+            except Exception:
+                try:
+                    # fallback: resp.choices[0].text
+                    text = resp.choices[0].text.strip()
+                except Exception:
+                    text = str(resp)
+
+            # crude parse: extract lines and map to fields if present; else put full text into both
+            analysis = text
+            suggestion = text
+
+            # If model returned JSON text, try to parse it
+            try:
+                import json
+                parsed = None
+                # find a JSON substring if present
+                first = text.find("{")
+                last = text.rfind("}")
+                if first != -1 and last != -1 and last > first:
+                    jtxt = text[first:last+1]
+                    parsed = json.loads(jtxt)
+                if parsed:
+                    analysis = parsed.get("analysis") or parsed.get("explanation") or str(parsed)
+                    suggestion = parsed.get("suggestion") or parsed.get("suggestions") or parsed.get("advice") or analysis
+            except Exception:
+                # ignore parse errors
+                pass
+
+            return {"analysis": analysis, "suggestion": suggestion}
+        except Exception as e:
+            last_err = e
+            attempt += 1
+            # exponential backoff with jitter
+            sleep_for = backoff + (0.1 * (attempt))
+            time.sleep(sleep_for)
+            backoff *= 2
+            continue
+
+    raise last_err or RuntimeError("OpenAI call failed")
+
+def analyze_event_ai(event_id: str, event_payload=None, event_meta=None) -> dict:
+    """
+    Public callable used by app.py. Always returns a dict:
+      {"analysis": str, "suggestion": str, "provider": "openai" | "local-heuristic"}
+    Never raises — on error returns local-heuristic fallback.
     """
     try:
-        # Build a concise prompt that helps reliability analysis
-        payload_preview = json.dumps(event_payload or {}, default=str)[:3000]
-        meta_preview = json.dumps(event_meta or {}, default=str)[:1200]
-        prompt = (
-            f"Event ID: {event_id}\n\n"
-            f"Payload (truncated): {payload_preview}\n\n"
-            f"Meta (truncated): {meta_preview}\n\n"
-            "You are a pragmatic site reliability engineer. Give:\n"
-            "1) A 1-3 line concise analysis of the likely root cause.\n"
-            "2) A short actionable fix (1-5 bullet points) a developer/DevOps can apply now.\n"
-            "Be concise and do not hallucinate config values. If unsure, say what logs to inspect (correlationId, stacktrace).\n"
-        )
+        # If openai available and configured, use it
+        if _openai is not None:
+            prompt = _build_prompt(event_id, event_payload, event_meta)
+            try:
+                out = _call_openai(prompt)
+                return {
+                    "analysis": out.get("analysis", "No analysis returned"),
+                    "suggestion": out.get("suggestion", "No suggestion returned"),
+                    "provider": "openai"
+                }
+            except Exception as e:
+                # log but continue to fallback
+                print("ai_router: openai call failed:", e)
+                # fall through to local heuristic
+        # Local heuristic fallback: quick, deterministic
+        # Try to extract short useful hints from payload
+        hint = "No clear pattern from payload. Inspect logs with correlationId for RCA."
+        try:
+            if event_payload:
+                s = str(event_payload).lower()
+                if "timeout" in s or "connection" in s:
+                    hint = "Check DB/network connection pools, timeouts, and retry/backoff behavior."
+                elif "memory" in s or "oom" in s:
+                    hint = "Investigate memory usage: inspect recent alloc, GC, cgroups, and reduce worker concurrency."
+                elif "502" in s or "bad gateway" in s:
+                    hint = "502s often indicate upstream failures — check upstream health and request latencies."
+                elif "latency" in s:
+                    hint = "Investigate p95/p99 latency, slow queries, thread/worker saturation, and external API calls."
+        except Exception:
+            pass
 
-        ok, result = call_openai(prompt, timeout_seconds=8, max_retries=2)
-        if ok and result.get("analysis"):
-            # Normalize shape
-            return {"analysis": result["analysis"], "suggestion": result["suggestion"], "provider": result.get("provider","openai")}
-        # else fallback
-        return local_heuristic(event_payload, event_meta)
-    except Exception as e:
-        # In case anything unexpected breaks here, always return local heuristic so UI isn't blocked.
-        traceback.print_exc()
-        return local_heuristic(event_payload, event_meta)
+        return {"analysis": f"Local heuristic used due to missing AI response.", "suggestion": hint, "provider": "local-heuristic"}
+
+    except Exception as top_e:
+        # ultimate fallback — never crash
+        return {"analysis": "Local heuristic (unexpected error in ai_router)", "suggestion": "Inspect application logs for ai_router exception.", "provider": "local-heuristic"}

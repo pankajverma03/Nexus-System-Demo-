@@ -3,5 +3,4 @@ gunicorn
 SQLAlchemy>=1.4
 psycopg2-binary
 requests
-# optional: openai (only if you implement ai_router call)
-openai
+openai>=1.0.0

@@ -74,7 +74,7 @@ def ensure_demo_tables(db):
             ))
             db.execute(_text(
                 "CREATE TABLE IF NOT EXISTS ai_suggestions ("
-                "id SERIAL PRIMARY KEY, event_id TEXT, title TEXT, body TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+                "id BIGINT PRIMARY KEY, event_id TEXT, title TEXT, body TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
             ))
         else:
             # SQLite / generic fallback
@@ -93,31 +93,64 @@ def ensure_demo_tables(db):
 def insert_ai_suggestion(db, event_id, title, body):
     """
     Try to insert into ai_suggestions safely, isolating errors so Postgres doesn't lock the session.
+    Returns (ok: bool, error: str|None)
     """
     try:
-        # Generate numeric id for Postgres (safe unique int)
-        suggestion_id_int = int(time.time() * 1000) + random.randint(10, 99)
-        params = {"id": suggestion_id_int, "eid": event_id, "t": title, "b": body}
-
-        # Try normal insert
-        db.execute(text("INSERT INTO ai_suggestions (id, event_id, title, body) VALUES (:id, :eid, :t, :b)"), params)
-        db.commit()
-        return True, None
-
-    except Exception as e:
-        # Rollback the failed transaction before retry or return
-        db.rollback()
-        app.logger.warning(f"insert_ai_suggestion: insert failed, rolling back. Error={e}")
-
-        # Try fallback insert without id (if DB autogenerates it)
+        # Determine if Postgres-like engine uses numeric PK or expects provided id
+        is_postgres = False
         try:
-            db.execute(text("INSERT INTO ai_suggestions (event_id, title, body) VALUES (:eid, :t, :b)"), params)
-            db.commit()
-            return True, None
-        except Exception as e2:
-            db.rollback()
-            app.logger.error(f"insert_ai_suggestion: fallback also failed: {e2}")
-            return False, str(e2)
+            is_postgres = getattr(engine, "dialect").name in ("postgresql", "postgres")
+        except Exception:
+            try:
+                is_postgres = str(getattr(engine, "url", "")).startswith("postgres")
+            except Exception:
+                is_postgres = False
+
+        # If Postgres (or engine uses numeric primary key without default), generate numeric id
+        if is_postgres:
+            suggestion_id = int(time.time() * 1000) + random.randint(10, 999)
+            params = {"id": suggestion_id, "eid": event_id, "t": title, "b": body}
+            try:
+                db.execute(text("INSERT INTO ai_suggestions (id, event_id, title, body) VALUES (:id, :eid, :t, :b)"), params)
+                db.commit()
+                return True, None
+            except Exception as e:
+                db.rollback()
+                app.logger.warning(f"insert_ai_suggestion: Postgres-style insert failed: {e}")
+                # try fallback without id (if table has serial/default)
+                try:
+                    db.execute(text("INSERT INTO ai_suggestions (event_id, title, body) VALUES (:eid, :t, :b)"),
+                               {"eid": event_id, "t": title, "b": body})
+                    db.commit()
+                    return True, None
+                except Exception as e2:
+                    db.rollback()
+                    app.logger.error(f"insert_ai_suggestion: fallback also failed: {e2}")
+                    return False, str(e2)
+        else:
+            # SQLite path: prefer letting DB auto-generate id
+            params = {"eid": event_id, "t": title, "b": body}
+            try:
+                db.execute(text("INSERT INTO ai_suggestions (event_id, title, body) VALUES (:eid, :t, :b)"), params)
+                db.commit()
+                return True, None
+            except Exception as e:
+                db.rollback()
+                app.logger.warning(f"insert_ai_suggestion: sqlite insert failed, attempting explicit id fallback: {e}")
+                # fallback: explicit numeric id (fits INTEGER PK)
+                try:
+                    suggestion_id = int(time.time() * 1000) + random.randint(10, 999)
+                    params2 = {"id": suggestion_id, "eid": event_id, "t": title, "b": body}
+                    db.execute(text("INSERT INTO ai_suggestions (id, event_id, title, body) VALUES (:id, :eid, :t, :b)"), params2)
+                    db.commit()
+                    return True, None
+                except Exception as e2:
+                    db.rollback()
+                    app.logger.error(f"insert_ai_suggestion: fallback explicit id also failed: {e2}")
+                    return False, str(e2)
+    except Exception as e:
+        app.logger.exception(f"insert_ai_suggestion unexpected error: {e}")
+        return False, str(e)
 
 def seed_demo_events():
     """
@@ -154,7 +187,7 @@ def seed_demo_events():
             ok, err = insert_ai_suggestion(db, "ev_demo_1", "Investigate DB timeout", "Check DB connections; restart DB pool if necessary.")
             if not ok:
                 app.logger.warning(f"seed_demo_events: failed to insert demo suggestion: {err}")
-            db.commit()
+            # no extra commit here because insert_ai_suggestion commits as needed
             app.logger.info("Seeded demo events and ai_suggestions (5 events + 1 suggestion)")
     except Exception as e:
         app.logger.exception(f"seed_demo_events failed: {e}")
@@ -213,7 +246,11 @@ def dashboard():
         {"level": "Info", "msg": "Firmware deploy success", "age": "1h"},
     ]
 
-    return render_template('dashboard.html', title='Nexus System Dashboard', snapshot=snapshot, alerts=alerts)
+    # render_template will need templates/dashboard.html in repo; fallback to simple message if missing
+    try:
+        return render_template('dashboard.html', title='Nexus System Dashboard', snapshot=snapshot, alerts=alerts)
+    except Exception:
+        return jsonify(snapshot=snapshot, alerts=alerts)
 
 # --- Health endpoint ---
 @app.route('/health')
@@ -285,7 +322,7 @@ def api_ingest():
             ok, err = insert_ai_suggestion(db, event_id, sim_title, sim_body)
             if not ok:
                 app.logger.warning(f"api_ingest: failed to persist suggestion: {err}")
-            db.commit()
+            # insert_ai_suggestion commits when successful
 
         suggestion = {"suggestion": sim_body, "action": "Check application logs and restart service if persistent."}
         return jsonify({"ok": True, "event_id": event_id, "suggestion": suggestion}), 201
@@ -294,7 +331,7 @@ def api_ingest():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 # -------------------------
-# Add this GET endpoint to expose stored AI suggestions to the frontend
+# Return recent AI suggestions
 # -------------------------
 @app.route("/api/ai/suggestions", methods=["GET"])
 def api_ai_suggestions():
@@ -357,6 +394,8 @@ def api_ai_suggest():
         if SessionLocal:
             with SessionLocal() as db:
                 # Try fetch event row
+                # ensure table exists to avoid undefined column errors
+                ensure_demo_tables(db)
                 row = db.execute(text("SELECT message FROM events WHERE id = :id"), {"id": event_id}).fetchone()
                 if row:
                     event_payload = row[0]
@@ -377,7 +416,7 @@ def api_ai_suggest():
     else:
         # Local heuristic fallback
         summary = f"Event {event_id}: local-heuristic analysis"
-        suggestion = "Check network connectivity and restart the affected node."
+        suggestion = "No clear pattern from payload. Inspect logs with correlationId for RCA."
         res = {"analysis": summary, "suggestion": suggestion, "provider": "local-heuristic"}
 
     # optional persist suggestion (best-effort)
@@ -388,85 +427,15 @@ def api_ai_suggest():
                 ok, err = insert_ai_suggestion(db, event_id, f"{res.get('provider')} suggestion", res.get("suggestion"))
                 if not ok:
                     app.logger.warning(f"api_ai_suggest: failed to persist suggestion: {err}")
-                db.commit()
+                # insert_ai_suggestion commits on success
     except Exception as e:
         app.logger.warning(f"Failed to persist AISuggestion: {e}")
 
     return jsonify(ok=True, **res), 200
 
-# ----------------- TEMP: DB migration helper (run once) -----------------
+# ----------------- TEMP: DB migration helpers (run once) -----------------
 @app.route('/admin/fix_ai_table', methods=['POST', 'GET'])
 def admin_fix_ai_table():
-    # ----------------- TEMP: DB migration helper (events table) -----------------
-@app.route('/admin/fix_events_table', methods=['POST', 'GET'])
-def admin_fix_events_table():
-    """
-    TEMP route - run once to ensure events.message column exists and copy data from `msg`
-    Protect with MIGRATE_SECRET env var. Remove this route after success.
-    """
-    secret = os.environ.get("MIGRATE_SECRET", "")
-    q = request.args.get("secret") or request.form.get("secret") or ""
-    if not secret or q != secret:
-        return jsonify(ok=False, error="missing/invalid secret"), 403
-
-    init_db_engine()
-    if SessionLocal is None:
-        return jsonify(ok=False, error="DB not available"), 500
-
-    results = []
-    try:
-        with SessionLocal() as db:
-            # 1) Add message column if missing (Postgres & SQLite both support IF NOT EXISTS for ALTER)
-            try:
-                db.execute(text("ALTER TABLE events ADD COLUMN IF NOT EXISTS message TEXT;"))
-                results.append({"stmt": "ALTER TABLE events ADD COLUMN IF NOT EXISTS message TEXT;", "ok": True})
-            except Exception as e:
-                results.append({"stmt": "ALTER TABLE add message", "ok": False, "error": str(e)})
-
-            # 2) If column 'msg' exists, copy it into message where message is null.
-            # Use plpgsql block for Postgres safe conditional copy; if not Postgres, try simple update guarded by existence check.
-            try:
-                is_postgres = False
-                try:
-                    is_postgres = getattr(engine, "dialect").name in ("postgresql", "postgres")
-                except Exception:
-                    is_postgres = str(getattr(engine, "url", "")).startswith("postgres")
-
-                if is_postgres:
-                    # Postgres: conditional DO block (safe even if 'msg' doesn't exist)
-                    copy_sql = """
-                    DO $$
-                    BEGIN
-                      IF EXISTS (
-                        SELECT 1 FROM information_schema.columns
-                        WHERE table_name='events' AND column_name='msg'
-                      ) THEN
-                        -- copy msg -> message, only where message is NULL
-                        EXECUTE 'UPDATE events SET message = msg WHERE message IS NULL AND msg IS NOT NULL';
-                      END IF;
-                    END$$;
-                    """
-                    db.execute(text(copy_sql))
-                else:
-                    # SQLite or other: check information_schema may not exist. Try a guarded update (wrap in try/except).
-                    try:
-                        db.execute(text("UPDATE events SET message = msg WHERE message IS NULL;"))
-                    except Exception:
-                        # fallback: nothing to copy
-                        pass
-
-                results.append({"stmt": "copy msg -> message (if present)", "ok": True})
-            except Exception as e:
-                results.append({"stmt": "copy msg -> message", "ok": False, "error": str(e)})
-
-            db.commit()
-
-        return jsonify(ok=True, results=results), 200
-
-    except Exception as e:
-        app.logger.exception(f"admin_fix_events_table failed: {e}")
-        return jsonify(ok=False, error=str(e)), 500
-# -----------------------------------------------------------------------
     """
     TEMP route - run once to add missing columns to ai_suggestions in Postgres.
     Protect with MIGRATE_SECRET env var. Remove this route after success.
@@ -484,9 +453,7 @@ def admin_fix_events_table():
         # add title/body/created_at if missing
         "ALTER TABLE ai_suggestions ADD COLUMN IF NOT EXISTS title TEXT;",
         "ALTER TABLE ai_suggestions ADD COLUMN IF NOT EXISTS body TEXT;",
-        "ALTER TABLE ai_suggestions ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;",
-        # ensure id exists (if created earlier differently), try to avoid breaking existing PK
-        # no-op if column already exists
+        "ALTER TABLE ai_suggestions ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;"
     ]
     results = []
     try:
@@ -501,16 +468,10 @@ def admin_fix_events_table():
         return jsonify(ok=True, results=results), 200
     except Exception as e:
         return jsonify(ok=False, error=str(e)), 500
-# -----------------------------------------------------------------------
 
-# standard run for local debug (ignored by gunicorn)
-if __name__ == '__main__':
-    init_db_engine()
-    # seed immediately for local dev if configured
-    try:
-        if engine is not None and str(getattr(engine, "url", "")).startswith("sqlite"):
-            seed_demo_events()
-    except Exception:
-        app.logger.debug("initial seed attempt failed: " + traceback.format_exc())
-
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)), debug=True)
+@app.route('/admin/fix_events_table', methods=['POST', 'GET'])
+def admin_fix_events_table():
+    """
+    TEMP route - run once to ensure events.message column exists and copy data from `msg`
+    Protect with MIGRATE_SECRET env var. Remove this route after success.
+    ""

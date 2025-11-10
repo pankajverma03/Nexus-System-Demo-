@@ -92,37 +92,32 @@ def ensure_demo_tables(db):
 # --- helper: insert AI suggestion in a dialect-resilient way ---
 def insert_ai_suggestion(db, event_id, title, body):
     """
-    Try to insert into ai_suggestions. Many legacy DBs may have 'id' without default.
-    Preferred: attempt to INSERT without id (let DB default). If that fails due to NOT NULL,
-    fallback to inserting a numeric id generated here (timestamp-based integer).
+    Try to insert into ai_suggestions safely, isolating errors so Postgres doesn't lock the session.
     """
-    # prepare parameters
-    params = {"eid": event_id, "t": title, "b": body}
-    is_postgres = False
     try:
-        is_postgres = getattr(engine, "dialect").name in ("postgresql", "postgres")
-    except Exception:
-        try:
-            is_postgres = str(getattr(engine, "url", "")).startswith("postgres")
-        except Exception:
-            is_postgres = False
+        # Generate numeric id for Postgres (safe unique int)
+        suggestion_id_int = int(time.time() * 1000) + random.randint(10, 99)
+        params = {"id": suggestion_id_int, "eid": event_id, "t": title, "b": body}
 
-    try:
-        # Try normal insert (let DB decide id default)
-        db.execute(text("INSERT INTO ai_suggestions (event_id, title, body) VALUES (:eid, :t, :b)"), params)
+        # Try normal insert
+        db.execute(text("INSERT INTO ai_suggestions (id, event_id, title, body) VALUES (:id, :eid, :t, :b)"), params)
+        db.commit()
         return True, None
-    except Exception as first_exc:
-        # Log first failure and attempt fallback with generated numeric id
-        app.logger.warning(f"ai_suggestions insert (no-id) failed, trying fallback id: {first_exc}")
+
+    except Exception as e:
+        # Rollback the failed transaction before retry or return
+        db.rollback()
+        app.logger.warning(f"insert_ai_suggestion: insert failed, rolling back. Error={e}")
+
+        # Try fallback insert without id (if DB autogenerates it)
         try:
-            # generate numeric id (fits integer SERIAL / INTEGER PK)
-            suggestion_id_int = int(time.time() * 1000)  # millisecond-based integer
-            fallback_params = {"id": suggestion_id_int, "eid": event_id, "t": title, "b": body}
-            db.execute(text("INSERT INTO ai_suggestions (id, event_id, title, body) VALUES (:id, :eid, :t, :b)"), fallback_params)
+            db.execute(text("INSERT INTO ai_suggestions (event_id, title, body) VALUES (:eid, :t, :b)"), params)
+            db.commit()
             return True, None
-        except Exception as second_exc:
-            app.logger.exception(f"ai_suggestions fallback insert failed: {second_exc}")
-            return False, str(second_exc)
+        except Exception as e2:
+            db.rollback()
+            app.logger.error(f"insert_ai_suggestion: fallback also failed: {e2}")
+            return False, str(e2)
 
 def seed_demo_events():
     """

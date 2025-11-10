@@ -397,6 +397,76 @@ def api_ai_suggest():
 # ----------------- TEMP: DB migration helper (run once) -----------------
 @app.route('/admin/fix_ai_table', methods=['POST', 'GET'])
 def admin_fix_ai_table():
+    # ----------------- TEMP: DB migration helper (events table) -----------------
+@app.route('/admin/fix_events_table', methods=['POST', 'GET'])
+def admin_fix_events_table():
+    """
+    TEMP route - run once to ensure events.message column exists and copy data from `msg`
+    Protect with MIGRATE_SECRET env var. Remove this route after success.
+    """
+    secret = os.environ.get("MIGRATE_SECRET", "")
+    q = request.args.get("secret") or request.form.get("secret") or ""
+    if not secret or q != secret:
+        return jsonify(ok=False, error="missing/invalid secret"), 403
+
+    init_db_engine()
+    if SessionLocal is None:
+        return jsonify(ok=False, error="DB not available"), 500
+
+    results = []
+    try:
+        with SessionLocal() as db:
+            # 1) Add message column if missing (Postgres & SQLite both support IF NOT EXISTS for ALTER)
+            try:
+                db.execute(text("ALTER TABLE events ADD COLUMN IF NOT EXISTS message TEXT;"))
+                results.append({"stmt": "ALTER TABLE events ADD COLUMN IF NOT EXISTS message TEXT;", "ok": True})
+            except Exception as e:
+                results.append({"stmt": "ALTER TABLE add message", "ok": False, "error": str(e)})
+
+            # 2) If column 'msg' exists, copy it into message where message is null.
+            # Use plpgsql block for Postgres safe conditional copy; if not Postgres, try simple update guarded by existence check.
+            try:
+                is_postgres = False
+                try:
+                    is_postgres = getattr(engine, "dialect").name in ("postgresql", "postgres")
+                except Exception:
+                    is_postgres = str(getattr(engine, "url", "")).startswith("postgres")
+
+                if is_postgres:
+                    # Postgres: conditional DO block (safe even if 'msg' doesn't exist)
+                    copy_sql = """
+                    DO $$
+                    BEGIN
+                      IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='events' AND column_name='msg'
+                      ) THEN
+                        -- copy msg -> message, only where message is NULL
+                        EXECUTE 'UPDATE events SET message = msg WHERE message IS NULL AND msg IS NOT NULL';
+                      END IF;
+                    END$$;
+                    """
+                    db.execute(text(copy_sql))
+                else:
+                    # SQLite or other: check information_schema may not exist. Try a guarded update (wrap in try/except).
+                    try:
+                        db.execute(text("UPDATE events SET message = msg WHERE message IS NULL;"))
+                    except Exception:
+                        # fallback: nothing to copy
+                        pass
+
+                results.append({"stmt": "copy msg -> message (if present)", "ok": True})
+            except Exception as e:
+                results.append({"stmt": "copy msg -> message", "ok": False, "error": str(e)})
+
+            db.commit()
+
+        return jsonify(ok=True, results=results), 200
+
+    except Exception as e:
+        app.logger.exception(f"admin_fix_events_table failed: {e}")
+        return jsonify(ok=False, error=str(e)), 500
+# -----------------------------------------------------------------------
     """
     TEMP route - run once to add missing columns to ai_suggestions in Postgres.
     Protect with MIGRATE_SECRET env var. Remove this route after success.

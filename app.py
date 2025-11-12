@@ -430,16 +430,18 @@ def api_ai_suggest():
     return jsonify(ok=True, **res), 200
 
 # ----------------- TEMP: DB migration helper (events table) -----------------
-@app.route('/admin/fix_events_table', methods=['POST', 'GET'])
+@app.route('/admin/fix_events_table', methods=['POST'])
 def admin_fix_events_table():
     """
-    TEMP route - run once to ensure events.message column exists and copy data from `msg`
-    Protect with MIGRATE_SECRET env var. Remove this route after success.
+    Temporary migration route — run once to ensure events.message column exists
+    and copy data from 'msg' into 'message' when appropriate.
+
+    Protect this route with MIGRATE_SECRET env var or use the ?secret= query param.
     """
     secret = os.environ.get("MIGRATE_SECRET", "")
-    q = request.args.get("secret") or request.form.get("secret") or ""
+    q = request.args.get("secret") or request.form.get("secret")
     if not secret or q != secret:
-        return jsonify(ok=False, error="missing/invalid secret"), 403
+        return jsonify(ok=False, error="missing/invalid secret"), 401
 
     init_db_engine()
     if SessionLocal is None:
@@ -448,34 +450,36 @@ def admin_fix_events_table():
     results = []
     try:
         with SessionLocal() as db:
-            # 1) Add message column if missing (Postgres & SQLite both support IF NOT EXISTS for ALTER)
+            # 1) Try add the message column (SQLite/Postgres safe-ish)
             try:
-                db.execute(text("ALTER TABLE events ADD COLUMN IF NOT EXISTS message TEXT;"))
-                results.append({"stmt": "ALTER TABLE events ADD COLUMN IF NOT EXISTS message TEXT;", "ok": True})
-            except Exception as e:
-                results.append({"stmt": "ALTER TABLE add message", "ok": False, "error": str(e)})
+                # dialect-aware alter: attempt SQLite-friendly, fallback to generic
+                db.execute(text("ALTER TABLE events ADD COLUMN IF NOT EXISTS message TEXT"))
+                results.append({"stmt": "ALTER TABLE events ADD COLUMN IF NOT EXISTS message TEXT"})
+            except Exception as e_add:
+                # Some dialects (older SQLite) may error on IF NOT EXISTS; ignore if column exists
+                results.append({"stmt": "ALTER TABLE (add) failed, will continue", "error": str(e_add)})
 
-            # 2) If column 'msg' exists, copy it into message where message is null.
+            # 2) If column 'msg' exists, copy into 'message' (Postgres: DO $$ ... END $$; else best-effort)
+            is_postgres = False
             try:
+                is_postgres = getattr(db.bind.dialect, "name", "") == "postgresql"
+            except Exception:
                 is_postgres = False
-                try:
-                    is_postgres = getattr(engine, "dialect").name in ("postgresql", "postgres")
-                except Exception:
-                    is_postgres = str(getattr(engine, "url", "")).startswith("postgres")
 
-                if is_postgres:
-                    copy_sql = """
-                    DO $$
-                    BEGIN
-                      IF EXISTS (
-                        SELECT 1 FROM information_schema.columns
-                        WHERE table_name='events' AND column_name='msg'
-                      ) THEN
-                        EXECUTE 'UPDATE events SET message = msg WHERE message IS NULL AND msg IS NOT NULL';
-                      END IF;
-                    END$$;
-                    """
+            if is_postgres:
+                copy_sql = """
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name='events' AND column_name='msg'
+  ) THEN
+    UPDATE events SET message = msg WHERE message IS NULL AND msg IS NOT NULL;
+  END IF;
+END$$;
+"""
+                try:
                     db.execute(text(copy_sql))
-                else:
-                    # SQLite or other: try best-effort update
-            
+                    results.append({"stmt": "Postgres copy executed"})
+                except Exception as e:
+                    results.append({"stmt": "P

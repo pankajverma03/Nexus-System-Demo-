@@ -1,6 +1,6 @@
 Flask>=2.2
 gunicorn
 SQLAlchemy>=1.4
-psycopg2-binary
 requests
 openai>=1.0.0
+psycopg2-binary==2.9.7   # only if you need Postgres
